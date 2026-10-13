@@ -48,8 +48,9 @@ APP_TITLE = "单词弹幕"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # 多词书：books\ 下每个 .csv 就是一本词书，面板里可切换
 BOOKS_DIR = os.path.join(APP_DIR, "books")
-DATA_CSV = os.path.join(BOOKS_DIR, "六级词汇大全（已学·152词）.csv")
-# 没在 config 里记过词书时优先用它（宇原本用的就是"六级已学"）
+DATA_CSV = os.path.join(BOOKS_DIR, "六级核心过考版（全部·2551词）.csv")
+# 没在 config 里记过词书时优先用它。
+# 原来是"六级词汇大全（已学·152词）"，2026-10-13 宇把那本删了，默认改到核心过考版。
 DEFAULT_BOOK_NAME = os.path.basename(DATA_CSV)
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 FONT_DIR = os.path.join(APP_DIR, "fonts")
@@ -1006,7 +1007,7 @@ def resolve_book(cfg):
 
 
 def load_words(path=DATA_CSV):
-    """读取已学单词 CSV，构造弹幕条目。返回 list[dict]。"""
+    """读取词书 CSV，构造弹幕条目。返回 list[dict]。"""
     if not os.path.exists(path):
         return []
     rows = []
