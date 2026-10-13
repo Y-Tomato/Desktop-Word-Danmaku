@@ -31,6 +31,7 @@ import time
 import ctypes
 import ctypes.wintypes
 import struct
+import zlib
 import tkinter as tk
 from tkinter import ttk, font as tkfont, messagebox
 
@@ -273,27 +274,55 @@ def _hex_rgb(color):
         return 255, 255, 255
 
 
-def _bgra_to_ppm(w, h, bgra):
-    """32bpp BGRA → 二进制 PPM(P6)。Tk 原生就吃 PPM，比 PNG 少一步 zlib。"""
+def _bgra_to_png(w, h, bgra, key_rgb):
+    """
+    32bpp BGRA → 真彩色 PNG + **tRNS**（把这个色键色声明成完全透明）。
+
+    ⚠️ 这里原本输出的是 PPM —— 快一档，但 PPM **没有"透明色"这个概念**：
+    位图整体不透明，被悬停那条又会被提到灰棋盘框**上面**，于是整块框被位图盖住；
+    Windows 再按窗口色键把位图里的底色像素抠掉 —— 抠出来的是**桌面**，不是框。
+    结果就是"文字笔画之间全是白底"（宇 2026-10-13 反馈「文字后的白色背景不要」，
+    白/浅色桌面越亮越明显）。
+    PNG 的 tRNS 让 **Tk 自己在 canvas 合成时**就把这些像素当 alpha=0 处理，
+    文字周围透出的就是下面那块框，底色不再参与窗口级抠除。
+    代价只有一次 zlib（level=1，实测每条约 1~3 ms，可忽略）。
+
+    顺带：RGB 用带步长切片搬运（同原 PPM 路径），比逐像素循环快两个数量级。
+    """
     stride = w * 4
-    raw = bytearray(w * h * 3)
+    row_bytes = w * 3
+    raw = bytearray(h * (row_bytes + 1))       # PNG 每行前面要多一个 filter 字节
     for y in range(h):
         row = bgra[y * stride:(y + 1) * stride]
-        base = y * w * 3
-        end = base + w * 3
-        # bytearray 的带步长切片赋值走 C 层，比逐像素循环快两个数量级
-        raw[base:end:3] = row[2::4]
-        raw[base + 1:end:3] = row[1::4]
-        raw[base + 2:end:3] = row[0::4]
-    return b"P6\n%d %d\n255\n" % (w, h) + bytes(raw)
+        base = y * (row_bytes + 1)
+        raw[base] = 0                          # filter type 0（None）
+        s = base + 1
+        e = s + row_bytes
+        raw[s:e:3] = row[2::4]
+        raw[s + 1:e:3] = row[1::4]
+        raw[s + 2:e:3] = row[0::4]
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+    return (b"\x89PNG\r\n\x1a\n" +
+            # color type 2 = truecolor(24bpp)，无 alpha 通道，透明色走 tRNS
+            chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+            # tRNS 必须排在 IDAT 之前；它只能表达"某色全透明"，没有半透明
+            chunk(b"tRNS", struct.pack(">HHH", key_rgb[0], key_rgb[1], key_rgb[2])) +
+            chunk(b"IDAT", zlib.compress(bytes(raw), 1)) +
+            chunk(b"IEND", b""))
 
 
 def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
                        ascent, linespace):
     """
-    把整条弹幕（所有段 + 8 向描边）画成一张位图，背景填色键色（会被抠掉）。
+    把整条弹幕（所有段 + 8 向描边）画成一张位图，背景填色键色；
+    输出 PNG 时用 tRNS 把这个色声明成透明 —— 于是它压在悬停框上时
+    **透出的是框**，而不是被窗口色键抠成洞、露出桌面（见 `_bgra_to_png`）。
 
-    返回 (w, h, ppm, off_x, off_y)：位图贴到 (cx - off_x, ys - off_y) 时，
+    返回 (w, h, png, off_x, off_y)：位图贴到 (cx - off_x, ys - off_y) 时，
     文字的落点与"逐段 text + anchor=nw"**逐像素重合**（用 TA_BASELINE 对齐基线，
     位图高度取 linespace，所以 canvas bbox 两者一致 —— 悬停信息框那些按 bbox
     排版的代码一行都不用改）。
@@ -362,7 +391,7 @@ def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
             x += sz.cx
 
         data = ctypes.string_at(bits.value, n * 4)
-        return w, h, _bgra_to_ppm(w, h, data), pad, pad
+        return w, h, _bgra_to_png(w, h, data, _KEY_RGB), pad, pad
     except Exception:
         _GDI_OK = False
         return None
@@ -1301,9 +1330,9 @@ class DanmakuLayer(object):
                                  met.get("ascent", int(font_px * 0.8)),
                                  met.get("linespace", int(font_px * 1.2)))
         if bmp is not None:
-            bw, bh, ppm, ox, oy = bmp
+            bw, bh, png, ox, oy = bmp
             try:
-                img = tk.PhotoImage(data=ppm)
+                img = tk.PhotoImage(data=png)
                 self.canvas.create_image(x - ox, ys - oy, anchor="nw",
                                          image=img, tags=(tag, "dm"))
             except Exception:
