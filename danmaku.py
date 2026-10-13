@@ -58,11 +58,8 @@ HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
-# 悬停结束时，压在它身上的那条弹幕要用多少倍速**冲刺让路**。
-# 原来是把悬停词冻在原地、等对方慢慢飘过去（好几秒，看着像卡死），
-# 现在换成给挡路的那条临时加速，让它快速越过去、悬停词立刻恢复移动。
-BOOST_MULT = 2.6
-# 兜底：万一加速会追尾前面的邻居，还是退回"原地排队等"，最多等这么久（秒）。
+# 让路排队的最长等待（秒）。悬停结束时要是有弹幕正压在身上就得等它走过去，
+# 正常情况下最多一两条身位就散了；这个上限纯粹是防止极端叠法把它永久卡住。
 UNFREEZE_WAIT_MAX = 8.0
 
 # 音标固定用微软雅黑（常规字重 —— 花底 + 小字号下粗体笔画会糊成一团）
@@ -74,9 +71,8 @@ FAV_BOOK_PATH = os.path.join(BOOKS_DIR, FAV_BOOK_NAME)
 # 旧名，仅为兼容：启动时若发现它存在会就地改名，config 里存了旧名也能认
 LEGACY_FAV_NAME = "favourite.csv"
 # 词书只留这三列：单词 / 音标 / 「词性 + 释义」。
-# 百词斩原表还有 topic_id（词条唯一 id，用于同步学习状态）、freq（词频）、
-# word_length、is_favorite，App 一行都不读 —— 留着只是给 CSV 涨体积
-# （6203 词那本能省掉三分之一），所以全砍。
+# 百词斩导出的 topic_id、freq、word_length、is_favorite 之类 App 一行都不读，
+# 留着只是给 CSV 涨体积（6203 词那本能省掉三分之一），所以全砍。
 BOOK_FIELDS = ["word", "accent", "mean_cn"]
 
 # 透明色键：该颜色会被 Windows 完全抠掉，窗口其余部分照常绘制
@@ -205,21 +201,6 @@ def get_screen_size():
     except Exception:
         pass
     return 1920, 1080
-
-
-# 描边副本数：8 = 八边形膨胀（推荐，拐角与曲线不台阶化）；
-# 4 = 只留四个对角副本（省一半 canvas item，但斜向笔画会出现 ov 像素的台阶）。
-# 之所以做成可调常量，是因为**每帧重绘的文本 item 数是本程序唯一的帧率瓶颈**
-# （实测 9 个 item / 104fps → 45 个 item / 58fps），调它就是在"画质 vs 帧率"上取舍。
-STROKE_DIRS = 8
-
-
-def stroke_offsets(ov, ov2):
-    """描边副本的偏移量表（ov=正交步长，ov2=斜角步长）。"""
-    if STROKE_DIRS >= 8:
-        return ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
-                (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
-    return ((-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
 
 
 # ---------- GDI 预渲染：把「8 向描边 + 正文」画成 1 张位图 ----------
@@ -1329,7 +1310,12 @@ class DanmakuLayer(object):
             # 退路：GDI 出问题时仍走逐段 text + 8 向描边（慢，但画质一模一样）
             ov = max(1, font_px // 22)
             ov2 = max(1, (ov * 7) // 10)     # 斜角副本略短一点，抵掉 √2 的几何拉伸
-            offs = stroke_offsets(ov, ov2)
+            # 描边：8 向（上下左右 + 四角）。
+            # 只画 4 个对角副本 = 用"菱形"去膨胀字身，笔画拐弯和弧线上会留下约 1 段
+            # 台阶（`ov` 像素的量化），放大看就是锯齿。补上四个正方向的副本后才是
+            # 真正的八边形膨胀：直边厚度不变、拐角与曲线变圆、台阶被填平。
+            offs = ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
+                    (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
             cx = x
             for ok, s in runs:
                 f = f_main if ok else f_fall
@@ -1376,10 +1362,10 @@ class DanmakuLayer(object):
         i = 0
         while i < len(self.items):
             it = self.items[i]
-            # 被悬停冻结的那条停在原地；正在冲刺让路的那条已从 "dm" 组摘走，
-            # 位移由 _tick_boost 自己算（这里再减一次就会和实际位置对不上）
-            if not it.get("frozen") and not it.get("boost"):
-                it["x"] -= step
+            if it.get("frozen"):
+                i += 1          # 被悬停冻结的那条停在原地，等鼠标移开再说
+                continue
+            it["x"] -= step
             if it["x"] + it["w"] < -20:
                 if it is self._hover:
                     self._set_hover(None)
@@ -1388,8 +1374,6 @@ class DanmakuLayer(object):
                 del self.items[i]        # 别用 list() 再 remove()，就地删更省
             else:
                 i += 1
-        # 正在冲刺让路的那几条：补上超出常速的位移
-        self._tick_boost(step)
         # 悬停结束后还在排队等让路的那几条：挡路的走过去了就放行
         self._retry_waiting()
 
@@ -1570,17 +1554,16 @@ class DanmakuLayer(object):
         fp = self._font_px()
         return fp * 1.05, max(12, int(fp * 0.45))
 
-    def _blockers(self, it):
+    def _blocked(self, it):
         """
-        此刻压在 it 身上的那几条（同一行且水平相交 —— 差距在 gap 之内就算压上）。
+        此刻有没有别的弹幕正压在这一条身上（同一行且水平相交）。
 
         当前悬停的那条要排除在外：它自己是静止的，如果把它算成障碍，
         就会出现「A 等 B、B 等 A」的死等（两个都不动，谁也不让谁）。
-        让别的弹幕从悬停那条身上穿过去是没问题的 —— 悬停那条永远在最上层，
-        视觉上就是"路过的那条从它身后飘过"，不会糊。
+        让等着的这条从悬停那条身后穿过去是没问题的 —— 悬停那条永远在最上层，
+        视觉上就是"路过的弹幕从后面飘过"，不会糊。
         """
         row, gap = self._row_gap()
-        out = []
         for o in self.items:
             if o is it or o is self._hover:
                 continue
@@ -1588,109 +1571,28 @@ class DanmakuLayer(object):
                 continue
             if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
                     and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
-                out.append(o)
-        return out
-
-    def _blocked(self, it):
-        return bool(self._blockers(it))
-
-    def _boost_safe(self, b):
-        """
-        给 b 加速前先看它**正前方**（左边）有没有贴得太近的邻居。
-
-        冲刺只是临时倍速，追尾了反而更糊，那还不如老实等（退回 waiting）。
-        """
-        row, gap = self._row_gap()
-        bx = float(b["x"])
-        for o in self.items:
-            if o is b:
-                continue
-            if abs(float(o["y"]) - float(b["y"])) >= row:
-                continue
-            right = float(o["x"]) + float(o["w"])
-            if right <= bx and bx - right < gap:
-                return False
-        return True
-
-    def _release(self, it):
-        """真正恢复移动：从冻结组回到运动组，并收掉排队的灰框。"""
-        it["waiting"] = False
-        it.pop("_wait_t", None)
-        if it.get("frozen"):
-            it["frozen"] = False
-            self.canvas.dtag(it["tag"], "dmfrozen")
-            self.canvas.addtag_withtag("dm", it["tag"])
-        self._drop_park_ui(it)
+                return True
+        return False
 
     def _unfreeze(self, it):
         """
-        解除冻结，恢复移动。
+        解除冻结，恢复移动 —— 但**不急着动**。
 
-        悬停期间允许后来者从它身上穿过去，鼠标一移开要是立刻同速跟上，就会和
-        正压在身上的那条**糊在一起飘走**。老办法是把悬停词冻在原地等对方走完，
-        但一等就是好几秒，看着像卡死。
-
-        现在的做法：**让挡路的那条冲刺让路** —— 给它一个临时倍速（BOOST_MULT），
-        快速从悬停词身上越过去，悬停词当场恢复移动。只有当冲刺会追尾前面的
-        邻居时，才退回"原地排队等"的老兜底（由 _retry_waiting 每帧复查）。
+        悬停期间允许后来者从它身上穿过去，鼠标一移开要是立刻跟上，就会和正压在
+        身上的那条糊成一团。所以它得先排队：等挡路的走开，再回到运动组。
+        等待期间依然保持 frozen（原地不动），由 _retry_waiting 每帧复查。
         """
         if not it.get("frozen"):
             return
-        blockers = self._blockers(it)
-        if not blockers:
-            self._release(it)
+        if self._blocked(it):
+            it["waiting"] = True
+            it["_wait_t"] = time.perf_counter()
             return
-        if all(self._boost_safe(b) for b in blockers):
-            for b in blockers:
-                b["boost"] = BOOST_MULT
-                b["_boosting"] = it["tag"]
-                # 从整体运动组摘出来单独加速（同 _freeze 的手法：换标签不动快路径）
-                self.canvas.dtag(b["tag"], "dm")
-                self.canvas.addtag_withtag("dmboost", b["tag"])
-            self._release(it)
-            return
-        it["waiting"] = True
-        it["_wait_t"] = time.perf_counter()
-
-    def _end_boost(self, b):
-        """冲刺结束：回到常速运动组。"""
-        b.pop("boost", None)
-        b.pop("_bacc", None)
-        b.pop("_boosting", None)
-        self.canvas.dtag(b["tag"], "dmboost")
-        self.canvas.addtag_withtag("dm", b["tag"])
-
-    def _tick_boost(self, step):
-        """
-        推进正在冲刺让路的那几条（它们已从 "dm" 组摘出来，整体那句
-        canvas.move("dm") 不再管它们，所以从常速到加速全在这里走）。
-
-        位移按**浮点累计后取整**，而不是每帧 int(step*mult)：慢速时 step 小，
-        取整会把倍速吃掉（int(1*2.6)=2 还行，int(1*1.3)=1 就等于没加速）。
-        """
-        if not any(it.get("boost") for it in self.items):
-            return
-        row, gap = self._row_gap()
-        for b in self.items:
-            mult = b.get("boost")
-            if not mult:
-                continue
-            b["_bacc"] = b.get("_bacc", 0.0) + step * mult
-            ex = int(b["_bacc"])
-            if ex:
-                b["_bacc"] -= ex
-                self.canvas.move(b["tag"], -ex, 0)
-                b["x"] -= ex
-            tgt = None
-            for o in self.items:
-                if o["tag"] == b.get("_boosting"):
-                    tgt = o
-                    break
-            # 目标没了（飘出屏幕/被顶掉），或者已经整个越过去了 → 收工
-            if tgt is None or not (
-                    float(b["x"]) < float(tgt["x"]) + float(tgt["w"]) + gap
-                    and float(tgt["x"]) < float(b["x"]) + float(b["w"]) + gap):
-                self._end_boost(b)
+        it["waiting"] = False
+        it.pop("_wait_t", None)
+        it["frozen"] = False
+        self.canvas.dtag(it["tag"], "dmfrozen")
+        self.canvas.addtag_withtag("dm", it["tag"])
 
     def _retry_waiting(self):
         """每帧复查排队等让路的那几条：挡路的走过去了就放行。"""
@@ -1703,7 +1605,12 @@ class DanmakuLayer(object):
             waited = now - it.get("_wait_t", now)
             # 超时兜底：叠得再离谱也不能让它永远停在原地不动
             if not self._blocked(it) or waited > UNFREEZE_WAIT_MAX:
-                self._release(it)      # 真动起来了 —— 灰框这时候才收
+                it["waiting"] = False
+                it.pop("_wait_t", None)
+                it["frozen"] = False
+                self.canvas.dtag(it["tag"], "dmfrozen")
+                self.canvas.addtag_withtag("dm", it["tag"])
+                self._drop_park_ui(it)      # 真动起来了 —— 灰框这时候才收
 
     # -- 悬停信息框的绘制 -----------------------------------------
 
