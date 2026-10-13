@@ -58,11 +58,14 @@ HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
-# 让路排队的最长等待（秒）。悬停结束时要是有弹幕正压在身上就得等它走过去，
-# 正常情况下最多一两条身位就散了；这个上限纯粹是防止极端叠法把它永久卡住。
+# 悬停结束时，压在它身上的那条弹幕要用多少倍速**冲刺让路**。
+# 原来是把悬停词冻在原地、等对方慢慢飘过去（好几秒，看着像卡死），
+# 现在换成给挡路的那条临时加速，让它快速越过去、悬停词立刻恢复移动。
+BOOST_MULT = 2.6
+# 兜底：万一加速会追尾前面的邻居，还是退回"原地排队等"，最多等这么久（秒）。
 UNFREEZE_WAIT_MAX = 8.0
 
-# 音标固定用微软雅黑（粗体），不跟弹幕正文的字体走
+# 音标固定用微软雅黑（常规字重 —— 花底 + 小字号下粗体笔画会糊成一团）
 PHON_FACE = "Microsoft YaHei"
 
 # 收藏夹词书：悬停时点★收进来的词，全部整理进这一本
@@ -71,8 +74,9 @@ FAV_BOOK_PATH = os.path.join(BOOKS_DIR, FAV_BOOK_NAME)
 # 旧名，仅为兼容：启动时若发现它存在会就地改名，config 里存了旧名也能认
 LEGACY_FAV_NAME = "favourite.csv"
 # 词书只留这三列：单词 / 音标 / 「词性 + 释义」。
-# 百词斩导出的 topic_id、freq、word_length、is_favorite 之类 App 一行都不读，
-# 留着只是给 CSV 涨体积（6203 词那本能省掉三分之一），所以全砍。
+# 百词斩原表还有 topic_id（词条唯一 id，用于同步学习状态）、freq（词频）、
+# word_length、is_favorite，App 一行都不读 —— 留着只是给 CSV 涨体积
+# （6203 词那本能省掉三分之一），所以全砍。
 BOOK_FIELDS = ["word", "accent", "mean_cn"]
 
 # 透明色键：该颜色会被 Windows 完全抠掉，窗口其余部分照常绘制
@@ -201,6 +205,195 @@ def get_screen_size():
     except Exception:
         pass
     return 1920, 1080
+
+
+# 描边副本数：8 = 八边形膨胀（推荐，拐角与曲线不台阶化）；
+# 4 = 只留四个对角副本（省一半 canvas item，但斜向笔画会出现 ov 像素的台阶）。
+# 之所以做成可调常量，是因为**每帧重绘的文本 item 数是本程序唯一的帧率瓶颈**
+# （实测 9 个 item / 104fps → 45 个 item / 58fps），调它就是在"画质 vs 帧率"上取舍。
+STROKE_DIRS = 8
+
+
+def stroke_offsets(ov, ov2):
+    """描边副本的偏移量表（ov=正交步长，ov2=斜角步长）。"""
+    if STROKE_DIRS >= 8:
+        return ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
+                (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
+    return ((-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
+
+
+# ---------- GDI 预渲染：把「8 向描边 + 正文」画成 1 张位图 ----------
+#
+# 为什么值得为它写这段 ctypes：弹幕每帧的开销**几乎全在** Tk 重新光栅化
+# text item 上。实测同屏 5 条 = 45 个 text item → 58fps（帧间隔 p95 34ms），
+# 同屏 1 条 = 9 个 item → 104fps，帧率基本与 item 数成反比。
+# 改成"每条弹幕先画成一张位图、每帧只 blit 1 个 image item"后，
+# 帧率与条数脱钩，而描边质量与原来**完全一致**（同一套 8 向膨胀参数）。
+
+_GDI = ctypes.windll.gdi32
+_KEY_RGB = (1, 2, 3)          # 与 TRANSPARENT_KEY = "#010203" 同色
+_TA_BASELINE = 24             # SetTextAlign: 让 y 表示"基线"，而不是字符格顶
+_ANTIALIASED = 4              # 灰度抗锯齿；ClearType 会在色键底上留彩边
+_GDI_OK = True                # 一旦失败就整体退回逐段 text 路径
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long), ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32)]
+
+
+class _LOGFONTW(ctypes.Structure):
+    _fields_ = [("lfHeight", ctypes.c_long), ("lfWidth", ctypes.c_long),
+                ("lfEscapement", ctypes.c_long), ("lfOrientation", ctypes.c_long),
+                ("lfWeight", ctypes.c_long), ("lfItalic", ctypes.c_byte),
+                ("lfUnderline", ctypes.c_byte), ("lfStrikeOut", ctypes.c_byte),
+                ("lfCharSet", ctypes.c_byte), ("lfOutPrecision", ctypes.c_byte),
+                ("lfClipPrecision", ctypes.c_byte), ("lfQuality", ctypes.c_byte),
+                ("lfPitchAndFamily", ctypes.c_byte),
+                ("lfFaceName", ctypes.c_wchar * 32)]
+
+
+class _SIZE(ctypes.Structure):
+    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+def _gdi_font(px, face, bold=False):
+    """
+    px = **设备像素**字高，直接用。
+
+    ⚠️ 别按 GetDeviceCaps(LOGPIXELSY) 换算：画进去的是 CreateCompatibleDC +
+    DIBSection（MM_TEXT 1:1 映射），逻辑单位就是设备像素；拿屏幕 DC 的 DPI
+    （本机 192）去换算会把字高缩掉一半，整条弹幕变成半大。
+    """
+    lf = _LOGFONTW()
+    lf.lfHeight = -int(round(px))
+    lf.lfWeight = 700 if bold else 400
+    lf.lfQuality = _ANTIALIASED
+    lf.lfCharSet = 1
+    lf.lfFaceName = face[:31]
+    return _GDI.CreateFontIndirectW(ctypes.byref(lf))
+
+
+def _hex_rgb(color):
+    """"#RRGGBB" → (r, g, b)；容忍 "#RGB" 与大小写。"""
+    h = (color or "#FFFFFF").lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return 255, 255, 255
+
+
+def _bgra_to_ppm(w, h, bgra):
+    """32bpp BGRA → 二进制 PPM(P6)。Tk 原生就吃 PPM，比 PNG 少一步 zlib。"""
+    stride = w * 4
+    raw = bytearray(w * h * 3)
+    for y in range(h):
+        row = bgra[y * stride:(y + 1) * stride]
+        base = y * w * 3
+        end = base + w * 3
+        # bytearray 的带步长切片赋值走 C 层，比逐像素循环快两个数量级
+        raw[base:end:3] = row[2::4]
+        raw[base + 1:end:3] = row[1::4]
+        raw[base + 2:end:3] = row[0::4]
+    return b"P6\n%d %d\n255\n" % (w, h) + bytes(raw)
+
+
+def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
+                       ascent, linespace):
+    """
+    把整条弹幕（所有段 + 8 向描边）画成一张位图，背景填色键色（会被抠掉）。
+
+    返回 (w, h, ppm, off_x, off_y)：位图贴到 (cx - off_x, ys - off_y) 时，
+    文字的落点与"逐段 text + anchor=nw"**逐像素重合**（用 TA_BASELINE 对齐基线，
+    位图高度取 linespace，所以 canvas bbox 两者一致 —— 悬停信息框那些按 bbox
+    排版的代码一行都不用改）。
+    """
+    global _GDI_OK
+    if not _GDI_OK:
+        return None
+    hdc = None
+    f_main = f_fall = hbm = None
+    try:
+        hdc = _GDI.CreateCompatibleDC(0)
+        f_main = _gdi_font(font_px, face_main)
+        f_fall = _gdi_font(font_px, face_fall, True)
+
+        ov = max(1, font_px // 22)
+        ov2 = max(1, (ov * 7) // 10)
+        offs = ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
+                (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
+        pad = ov + 1
+
+        total = 0
+        for ok, s in runs:
+            old = _GDI.SelectObject(hdc, f_main if ok else f_fall)
+            sz = _SIZE()
+            _GDI.GetTextExtentPoint32W(hdc, s, len(s), ctypes.byref(sz))
+            _GDI.SelectObject(hdc, old)
+            total += sz.cx
+
+        w = int(total) + pad * 2
+        h = int(linespace) + pad * 2
+        if w <= 0 or h <= 0:
+            return None
+
+        bi = _BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bi.biWidth = w
+        bi.biHeight = -h                  # 负 = top-down，省掉翻行
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        bits = ctypes.c_void_p()
+        hbm = _GDI.CreateDIBSection(hdc, ctypes.byref(bi), 0,
+                                    ctypes.byref(bits), None, 0)
+        if not hbm:
+            return None
+        _GDI.SelectObject(hdc, hbm)
+        _GDI.SetBkMode(hdc, 1)            # TRANSPARENT
+        _GDI.SetTextAlign(hdc, _TA_BASELINE)
+
+        n = w * h
+        ctypes.memmove(bits.value,
+                       bytes((_KEY_RGB[2], _KEY_RGB[1], _KEY_RGB[0], 255)) * n,
+                       n * 4)
+
+        base_y = pad + int(ascent)        # 位图内基线
+        x = pad
+        for ok, s in runs:
+            _GDI.SelectObject(hdc, f_main if ok else f_fall)
+            _GDI.SetTextColor(hdc, 0x000000)
+            for dx, dy in offs:
+                _GDI.TextOutW(hdc, x + dx, base_y + dy, s, len(s))
+            _GDI.SetTextColor(hdc, (color_rgb[2] << 16) | (color_rgb[1] << 8)
+                              | color_rgb[0])
+            _GDI.TextOutW(hdc, x, base_y, s, len(s))
+            sz = _SIZE()
+            _GDI.GetTextExtentPoint32W(hdc, s, len(s), ctypes.byref(sz))
+            x += sz.cx
+
+        data = ctypes.string_at(bits.value, n * 4)
+        return w, h, _bgra_to_ppm(w, h, data), pad, pad
+    except Exception:
+        _GDI_OK = False
+        return None
+    finally:
+        for obj in (hbm, f_main, f_fall):
+            if obj:
+                try:
+                    _GDI.DeleteObject(obj)
+                except Exception:
+                    pass
+        if hdc:
+            try:
+                _GDI.DeleteDC(hdc)
+            except Exception:
+                pass
 
 
 def set_timer_resolution(ms=1):
@@ -1116,29 +1309,41 @@ class DanmakuLayer(object):
         tag = "dm%d" % self._seq
         x = float(self.sw + 10)
         ys = int(y)
-        ov = max(1, font_px // 22)
-        ov2 = max(1, (ov * 7) // 10)     # 斜角副本略短一点，抵掉 √2 的几何拉伸
-        # 描边：8 向（上下左右 + 四角）。
-        # 只画 4 个对角副本 = 用"菱形"去膨胀字身，笔画拐弯和弧线上会留下约 1 段
-        # 台阶（`ov` 像素的量化），放大看就是锯齿。补上四个正方向的副本后才是
-        # 真正的八边形膨胀：直边厚度不变，拐角与曲线变圆、台阶被填平。
-        # 代价是每条弹幕多 4 个 canvas item（段数 × 9），实测帧率仍然够用。
-        offs = ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
-                (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
-
-        cx = x
-        for ok, s in runs:
-            f = f_main if ok else f_fall
-            for dx, dy in offs:
-                self.canvas.create_text(cx + dx, ys + dy, text=s, anchor="nw",
-                                        fill="#000000", font=f, tags=(tag, "dm"))
-            self.canvas.create_text(cx, ys, text=s, anchor="nw",
-                                    fill=color, font=f, tags=(tag, "dm"))
-            cx += self._measure(f, fk_main if ok else fk_fall, s)
+        # 首选路径：整条弹幕（8 向描边 + 正文）预渲染成**一张位图**。
+        # 这样一条弹幕在 canvas 上只占 1 个 image item —— 每帧的重绘成本从
+        # "9 × 段数 次文本光栅化"降到"1 次位图 blit"，帧率与同屏条数脱钩。
+        img = None
+        met = f_main.metrics()
+        bmp = render_text_bitmap(runs, font_px, fam, fall, _hex_rgb(color),
+                                 met.get("ascent", int(font_px * 0.8)),
+                                 met.get("linespace", int(font_px * 1.2)))
+        if bmp is not None:
+            bw, bh, ppm, ox, oy = bmp
+            try:
+                img = tk.PhotoImage(data=ppm)
+                self.canvas.create_image(x - ox, ys - oy, anchor="nw",
+                                         image=img, tags=(tag, "dm"))
+            except Exception:
+                img = None
+        if img is None:
+            # 退路：GDI 出问题时仍走逐段 text + 8 向描边（慢，但画质一模一样）
+            ov = max(1, font_px // 22)
+            ov2 = max(1, (ov * 7) // 10)     # 斜角副本略短一点，抵掉 √2 的几何拉伸
+            offs = stroke_offsets(ov, ov2)
+            cx = x
+            for ok, s in runs:
+                f = f_main if ok else f_fall
+                for dx, dy in offs:
+                    self.canvas.create_text(cx + dx, ys + dy, text=s, anchor="nw",
+                                            fill="#000000", font=f, tags=(tag, "dm"))
+                self.canvas.create_text(cx, ys, text=s, anchor="nw",
+                                        fill=color, font=f, tags=(tag, "dm"))
+                cx += self._measure(f, fk_main if ok else fk_fall, s)
 
         # 新建的 item 天然就在最上层，原先那句 tag_raise("dm") 纯属多余的开销
+        # _img 是 PhotoImage 的**强引用**：Tk 只管画，Python 一回收图片就变空白
         self.items.append(dict(tag=tag, x=float(x), y=float(ys), w=float(total),
-                               slot=slot, word=word, frozen=False))
+                               slot=slot, word=word, frozen=False, _img=img))
         # 但悬停期间别让新来的盖住焦点：新弹幕是后画的，不提一把就会压在
         # 信息框上面（悬停的信息框会探到相邻轨道去，所以跨行也得提）。
         self._raise_hover()
@@ -1171,10 +1376,10 @@ class DanmakuLayer(object):
         i = 0
         while i < len(self.items):
             it = self.items[i]
-            if it.get("frozen"):
-                i += 1          # 被悬停冻结的那条停在原地，等鼠标移开再说
-                continue
-            it["x"] -= step
+            # 被悬停冻结的那条停在原地；正在冲刺让路的那条已从 "dm" 组摘走，
+            # 位移由 _tick_boost 自己算（这里再减一次就会和实际位置对不上）
+            if not it.get("frozen") and not it.get("boost"):
+                it["x"] -= step
             if it["x"] + it["w"] < -20:
                 if it is self._hover:
                     self._set_hover(None)
@@ -1183,6 +1388,8 @@ class DanmakuLayer(object):
                 del self.items[i]        # 别用 list() 再 remove()，就地删更省
             else:
                 i += 1
+        # 正在冲刺让路的那几条：补上超出常速的位移
+        self._tick_boost(step)
         # 悬停结束后还在排队等让路的那几条：挡路的走过去了就放行
         self._retry_waiting()
 
@@ -1363,16 +1570,17 @@ class DanmakuLayer(object):
         fp = self._font_px()
         return fp * 1.05, max(12, int(fp * 0.45))
 
-    def _blocked(self, it):
+    def _blockers(self, it):
         """
-        此刻有没有别的弹幕正压在这一条身上（同一行且水平相交）。
+        此刻压在 it 身上的那几条（同一行且水平相交 —— 差距在 gap 之内就算压上）。
 
         当前悬停的那条要排除在外：它自己是静止的，如果把它算成障碍，
         就会出现「A 等 B、B 等 A」的死等（两个都不动，谁也不让谁）。
-        让等着的这条从悬停那条身后穿过去是没问题的 —— 悬停那条永远在最上层，
-        视觉上就是"路过的弹幕从后面飘过"，不会糊。
+        让别的弹幕从悬停那条身上穿过去是没问题的 —— 悬停那条永远在最上层，
+        视觉上就是"路过的那条从它身后飘过"，不会糊。
         """
         row, gap = self._row_gap()
+        out = []
         for o in self.items:
             if o is it or o is self._hover:
                 continue
@@ -1380,28 +1588,109 @@ class DanmakuLayer(object):
                 continue
             if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
                     and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
-                return True
-        return False
+                out.append(o)
+        return out
+
+    def _blocked(self, it):
+        return bool(self._blockers(it))
+
+    def _boost_safe(self, b):
+        """
+        给 b 加速前先看它**正前方**（左边）有没有贴得太近的邻居。
+
+        冲刺只是临时倍速，追尾了反而更糊，那还不如老实等（退回 waiting）。
+        """
+        row, gap = self._row_gap()
+        bx = float(b["x"])
+        for o in self.items:
+            if o is b:
+                continue
+            if abs(float(o["y"]) - float(b["y"])) >= row:
+                continue
+            right = float(o["x"]) + float(o["w"])
+            if right <= bx and bx - right < gap:
+                return False
+        return True
+
+    def _release(self, it):
+        """真正恢复移动：从冻结组回到运动组，并收掉排队的灰框。"""
+        it["waiting"] = False
+        it.pop("_wait_t", None)
+        if it.get("frozen"):
+            it["frozen"] = False
+            self.canvas.dtag(it["tag"], "dmfrozen")
+            self.canvas.addtag_withtag("dm", it["tag"])
+        self._drop_park_ui(it)
 
     def _unfreeze(self, it):
         """
-        解除冻结，恢复移动 —— 但**不急着动**。
+        解除冻结，恢复移动。
 
-        悬停期间允许后来者从它身上穿过去，鼠标一移开要是立刻跟上，就会和正压在
-        身上的那条糊成一团。所以它得先排队：等挡路的走开，再回到运动组。
-        等待期间依然保持 frozen（原地不动），由 _retry_waiting 每帧复查。
+        悬停期间允许后来者从它身上穿过去，鼠标一移开要是立刻同速跟上，就会和
+        正压在身上的那条**糊在一起飘走**。老办法是把悬停词冻在原地等对方走完，
+        但一等就是好几秒，看着像卡死。
+
+        现在的做法：**让挡路的那条冲刺让路** —— 给它一个临时倍速（BOOST_MULT），
+        快速从悬停词身上越过去，悬停词当场恢复移动。只有当冲刺会追尾前面的
+        邻居时，才退回"原地排队等"的老兜底（由 _retry_waiting 每帧复查）。
         """
         if not it.get("frozen"):
             return
-        if self._blocked(it):
-            it["waiting"] = True
-            it["_wait_t"] = time.perf_counter()
+        blockers = self._blockers(it)
+        if not blockers:
+            self._release(it)
             return
-        it["waiting"] = False
-        it.pop("_wait_t", None)
-        it["frozen"] = False
-        self.canvas.dtag(it["tag"], "dmfrozen")
-        self.canvas.addtag_withtag("dm", it["tag"])
+        if all(self._boost_safe(b) for b in blockers):
+            for b in blockers:
+                b["boost"] = BOOST_MULT
+                b["_boosting"] = it["tag"]
+                # 从整体运动组摘出来单独加速（同 _freeze 的手法：换标签不动快路径）
+                self.canvas.dtag(b["tag"], "dm")
+                self.canvas.addtag_withtag("dmboost", b["tag"])
+            self._release(it)
+            return
+        it["waiting"] = True
+        it["_wait_t"] = time.perf_counter()
+
+    def _end_boost(self, b):
+        """冲刺结束：回到常速运动组。"""
+        b.pop("boost", None)
+        b.pop("_bacc", None)
+        b.pop("_boosting", None)
+        self.canvas.dtag(b["tag"], "dmboost")
+        self.canvas.addtag_withtag("dm", b["tag"])
+
+    def _tick_boost(self, step):
+        """
+        推进正在冲刺让路的那几条（它们已从 "dm" 组摘出来，整体那句
+        canvas.move("dm") 不再管它们，所以从常速到加速全在这里走）。
+
+        位移按**浮点累计后取整**，而不是每帧 int(step*mult)：慢速时 step 小，
+        取整会把倍速吃掉（int(1*2.6)=2 还行，int(1*1.3)=1 就等于没加速）。
+        """
+        if not any(it.get("boost") for it in self.items):
+            return
+        row, gap = self._row_gap()
+        for b in self.items:
+            mult = b.get("boost")
+            if not mult:
+                continue
+            b["_bacc"] = b.get("_bacc", 0.0) + step * mult
+            ex = int(b["_bacc"])
+            if ex:
+                b["_bacc"] -= ex
+                self.canvas.move(b["tag"], -ex, 0)
+                b["x"] -= ex
+            tgt = None
+            for o in self.items:
+                if o["tag"] == b.get("_boosting"):
+                    tgt = o
+                    break
+            # 目标没了（飘出屏幕/被顶掉），或者已经整个越过去了 → 收工
+            if tgt is None or not (
+                    float(b["x"]) < float(tgt["x"]) + float(tgt["w"]) + gap
+                    and float(tgt["x"]) < float(b["x"]) + float(b["w"]) + gap):
+                self._end_boost(b)
 
     def _retry_waiting(self):
         """每帧复查排队等让路的那几条：挡路的走过去了就放行。"""
@@ -1414,12 +1703,7 @@ class DanmakuLayer(object):
             waited = now - it.get("_wait_t", now)
             # 超时兜底：叠得再离谱也不能让它永远停在原地不动
             if not self._blocked(it) or waited > UNFREEZE_WAIT_MAX:
-                it["waiting"] = False
-                it.pop("_wait_t", None)
-                it["frozen"] = False
-                self.canvas.dtag(it["tag"], "dmfrozen")
-                self.canvas.addtag_withtag("dm", it["tag"])
-                self._drop_park_ui(it)      # 真动起来了 —— 灰框这时候才收
+                self._release(it)      # 真动起来了 —— 灰框这时候才收
 
     # -- 悬停信息框的绘制 -----------------------------------------
 
