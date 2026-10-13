@@ -61,9 +61,16 @@ HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
-# 让路排队的最长等待（秒）。悬停结束时要是有弹幕正压在身上就得等它走过去，
-# 正常情况下最多一两条身位就散了；这个上限纯粹是防止极端叠法把它永久卡住。
+# 让路排队的最长等待（秒）。只有当压在身上的那条在**左边**（我往左走反而会追上它）
+# 时才用得上：那时这条只能老实等人家先过去，这条上限是防止极端叠法永久卡住。
 UNFREEZE_WAIT_MAX = 8.0
+
+# —— 「加速离开」让路（2026-10-13 定，接替上面的排队等待）——
+# 悬停结束时若有人压在它身上：被悬停那条**自己加速往左拉开距离**，
+# 压着它的那几条**原地停一步**让它先走，等它甩开了再恢复。
+# 之前那版是"让挡路的人加速冲过去"，宇看完实机否掉了；这次反过来，是他指定的。
+BOOST_MULT = 2.4     # 加速期间的倍率（正常 lane 速度的 2.4 倍）
+BOOST_MAX_SEC = 3.0  # 兜底：这么久还没甩开就恢复正常，谁也不许一直停着
 
 # 音标固定用微软雅黑（常规字重 —— 花底 + 小字号下粗体笔画会糊成一团）
 PHON_FACE = "Microsoft YaHei"
@@ -1262,6 +1269,7 @@ class DanmakuLayer(object):
         it = self.items[0]
         if it is self._hover:      # 别把焦点留在一条马上要被删掉的弹幕上
             self._set_hover(None)
+        self._end_boost(it)        # 它可能扣着几条正在给它让路的
         self.items.remove(it)
         self.canvas.delete(it["tag"])
         return True
@@ -1399,21 +1407,34 @@ class DanmakuLayer(object):
         # 一条 Tcl 命令移动全体：所有弹幕（含描边）共用 "dm" tag，
         # 逐条 canvas.move() 时同屏 8 条就是每帧 8 次 Tcl 往返，合并后只剩 1 次。
         self.canvas.move("dm", -step, 0)
+        # 「加速离开」那几条不能留在 dm 组里跟着常规步子走 —— 它们有另一档速度，
+        # 单独成组再一笔 move，同样只要一次 Tcl 往返。
+        boosts = [it for it in self.items
+                  if it.get("boost") and not it.get("frozen")]
+        bstep = int(step * BOOST_MULT) if boosts else 0
+        if bstep:
+            self.canvas.move("dmboost", -bstep, 0)
         i = 0
         while i < len(self.items):
             it = self.items[i]
             if it.get("frozen"):
-                i += 1          # 被悬停冻结的那条停在原地，等鼠标移开再说
+                i += 1          # 被悬停冻结的 / 给人让路停下的，都不动
                 continue
-            it["x"] -= step
+            it["x"] -= bstep if it.get("boost") else step
             if it["x"] + it["w"] < -20:
                 if it is self._hover:
                     self._set_hover(None)
+                # 它要是还在"加速离开"，得先把它扣着的那几条放出来，
+                # 不然它们会永远停在原地等一条已经出屏的弹幕。
+                self._end_boost(it)
                 self.canvas.delete(it["tag"])
                 del self.items[i]        # 别用 list() 再 remove()，就地删更省
             else:
                 i += 1
-        # 悬停结束后还在排队等让路的那几条：挡路的走过去了就放行
+        # 悬停结束后还在「加速离开」的那几条：甩开让路的就收功；
+        # 还有实在排不上队的，也在这儿复查能不能放行。
+        if boosts:
+            self._tick_boost()
         self._retry_waiting()
 
     # -- 悬停交互（大写锁定开启时）-------------------------------
@@ -1517,9 +1538,19 @@ class DanmakuLayer(object):
         要冻结某一条就只能改它的标签，不能为它把整条快路径废掉。
         """
         if it.get("frozen"):
+            # 已经在停着了：只再确认一遍它没留在任何**运动组**里
+            #（沿用旧的冻结状态时，标签可能还是上一轮留下的）
+            try:
+                self.canvas.dtag(it["tag"], "dm")
+                self.canvas.dtag(it["tag"], "dmboost")
+            except Exception:
+                pass
             return
         it["frozen"] = True
         self.canvas.dtag(it["tag"], "dm")
+        # ⚠️ 这一句不能省：正在加速那条被再次悬停时，它还挂着 dmboost 标签，
+        # 少了这句它就会跟着加速组继续被 move —— 明明写着 frozen 却还在跑。
+        self.canvas.dtag(it["tag"], "dmboost")
         self.canvas.addtag_withtag("dmfrozen", it["tag"])
 
     def _raise_hover(self):
@@ -1541,16 +1572,15 @@ class DanmakuLayer(object):
         fp = self._font_px()
         return fp * 1.05, max(12, int(fp * 0.45))
 
-    def _blocked(self, it):
+    def _blockers(self, it):
         """
-        此刻有没有别的弹幕正压在这一条身上（同一行且水平相交）。
+        此刻**有哪些**弹幕正压在这一条身上（同一行且水平相交）。
 
         当前悬停的那条要排除在外：它自己是静止的，如果把它算成障碍，
         就会出现「A 等 B、B 等 A」的死等（两个都不动，谁也不让谁）。
-        让等着的这条从悬停那条身后穿过去是没问题的 —— 悬停那条永远在最上层，
-        视觉上就是"路过的弹幕从后面飘过"，不会糊。
         """
         row, gap = self._row_gap()
+        out = []
         for o in self.items:
             if o is it or o is self._hover:
                 continue
@@ -1558,28 +1588,149 @@ class DanmakuLayer(object):
                 continue
             if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
                     and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
-                return True
-        return False
+                out.append(o)
+        return out
+
+    def _blocked(self, it):
+        """有没有别的弹幕压在这一条身上（只要知道有没有时用这个）。"""
+        return bool(self._blockers(it))
+
+    def _release(self, it):
+        """
+        把它放回运动组，恢复移动。
+
+        ⚠️ 三个运动组互斥（"dm" 常速 / "dmboost" 加速 / "dmfrozen" 停)，
+        进组前必须把另外两个标签都摘掉：留在 dmboost 里的 item 会跟着加速组
+        一并被 move，哪怕它此刻是"停着让路"的。
+        """
+        boss = it.pop("hold_for", None)
+        if boss is not None:      # 别让某人还以为自己在给这条让路
+            try:
+                ys = boss.get("_yield") or []
+                if it in ys:
+                    ys.remove(it)
+            except Exception:
+                pass
+        it["frozen"] = False
+        it.pop("waiting", None)
+        it.pop("_wait_t", None)
+        try:
+            self.canvas.dtag(it["tag"], "dmfrozen")
+            if it.get("boost"):
+                self.canvas.dtag(it["tag"], "dm")
+                self.canvas.addtag_withtag("dmboost", it["tag"])
+            else:
+                self.canvas.dtag(it["tag"], "dmboost")
+                self.canvas.addtag_withtag("dm", it["tag"])
+        except Exception:
+            pass
 
     def _unfreeze(self, it):
         """
-        解除冻结，恢复移动 —— 但**不急着动**。
+        悬停结束，恢复移动 —— 但现在不用它等别人了。
 
-        悬停期间允许后来者从它身上穿过去，鼠标一移开要是立刻跟上，就会和正压在
-        身上的那条糊成一团。所以它得先排队：等挡路的走开，再回到运动组。
-        等待期间依然保持 frozen（原地不动），由 _retry_waiting 每帧复查。
+        旧版是"我停着等挡路的飘过去"，宇看完说反了：**应该是它自己先走**。
+        现在改成：
+          · 压着它的那些人都在**右边**（后方追上来的）→ 它**加速往左**拉开距离，
+            那些人原地停一步给它让路，等它甩开了再动；
+          · 万一有人压在**左边**，往左走反而会追得更深 —— 这时才退回排队等待。
         """
         if not it.get("frozen"):
             return
-        if self._blocked(it):
-            it["waiting"] = True
+        if it.get("boost"):
+            self._release(it)      # 还在"加速离开"的路上，接着走就行
+            return
+        # ⚠️ 排除**正在加速离开**的那几条：它们此刻跑得比谁都快，等它们自己
+        # 走就行。更重要的是防死锁 —— 两条同时在给对方让路就谁也不动了
+        #（`_tick_boost` 会跳过 frozen 项，两边都停就再也没人唤醒它们）。
+        ys = [o for o in self._blockers(it) if not o.get("boost")]
+        if ys:
+            # 全都在这条右边 → 往前（左）拉得开，走加速那条路径
+            far = [(o["x"] + o["w"] / 2.0) > (it["x"] + it["w"] / 2.0)
+                   for o in ys]
+            if all(far):
+                self._start_boost(it, ys)
+                return
+            it["waiting"] = True          # 左边有人：只能等它先过去
             it["_wait_t"] = time.perf_counter()
             return
-        it["waiting"] = False
-        it.pop("_wait_t", None)
-        it["frozen"] = False
-        self.canvas.dtag(it["tag"], "dmfrozen")
-        self.canvas.addtag_withtag("dm", it["tag"])
+        self._release(it)
+
+    # -- 「加速离开 / 让路」 --------------------------------------
+
+    def _start_boost(self, it, ys):
+        """开始加速离开：给压着它的那几条挂上"停一步让路"的状态。"""
+        it["_yield"] = list(ys)
+        it["boost"] = True
+        it["_boost_t"] = time.perf_counter()
+        for o in ys:
+            o["hold_for"] = it
+            self._freeze(o)
+        self._release(it)        # 它自己回 dmboost 组（_release 认 boost 标记）
+
+    def _end_boost(self, it):
+        """收掉加速状态：当初给它让路的那几条全部放出来继续走。"""
+        if not it.get("boost"):
+            return
+        it["boost"] = False
+        it.pop("_boost_t", None)
+        for o in it.pop("_yield", []) or []:
+            self._release(o)
+        # 它这时候可能还在 frozen（比如又被悬停住了）—— 那就别顺手放行，
+        # 只处理标签：让 _unfreeze / hover 逻辑自己接。
+        if not it.get("frozen"):
+            try:
+                self.canvas.dtag(it["tag"], "dmboost")
+                self.canvas.addtag_withtag("dm", it["tag"])
+            except Exception:
+                pass
+
+    def _clear_of(self, it, others):
+        """it 与 others 里每一个在水平方向上都已拉开 gap 以上。"""
+        row, gap = self._row_gap()
+        for o in others:
+            if abs(float(o["y"]) - float(it["y"])) < row:
+                if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
+                        and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
+                    return False
+        return True
+
+    def _tailgate(self, it):
+        """
+        加速期间别为了甩开后面而撞上前面。
+
+        同速时永远追不上前车，但加速时确实会 —— 追近了就收功，
+        让双方回到正常速度，别为了甩开后面反而砸了"不重叠"这条规矩。
+
+        ⚠️ 阈值不是 gap 而是 **gap 的 2 倍**：等到"只剩 gap"才收功已经晚了 ——
+        触发的那一帧就已经算贴上了（`_leavecheck.py` 第一版就翻在这上面）。
+        多留一倍余量，收功时还好好的，回到同速后距离也不会继续缩短。
+        """
+        row, gap = self._row_gap()
+        safe = gap * 2.0
+        for o in self.items:
+            if o is it or o.get("hold_for") is it:
+                continue
+            if abs(float(o["y"]) - float(it["y"])) >= row:
+                continue
+            if (float(o["x"]) < float(it["x"])
+                    and float(o["x"]) + float(o["w"]) + safe > float(it["x"])):
+                return True
+        return False
+
+    def _tick_boost(self):
+        """每帧推进「加速离开」：甩开了（或超时 / 快撞前车）就各自回到正常节奏。"""
+        now = time.perf_counter()
+        live = set(id(o) for o in self.items)
+        for it in list(self.items):
+            if not it.get("boost") or it.get("frozen"):
+                continue
+            ys = [o for o in (it.get("_yield") or []) if id(o) in live]
+            if (not ys
+                    or now - it.get("_boost_t", now) > BOOST_MAX_SEC
+                    or self._clear_of(it, ys)
+                    or self._tailgate(it)):
+                self._end_boost(it)
 
     def _retry_waiting(self):
         """每帧复查排队等让路的那几条：挡路的走过去了就放行。"""
@@ -1851,6 +2002,7 @@ class DanmakuLayer(object):
     def clear(self):
         self._set_hover(None)
         for it in list(self.items):
+            self._end_boost(it)        # 清屏也要先把它扣着的让路状态收掉
             self.canvas.delete(it["tag"])
         self.items = []
 
