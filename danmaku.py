@@ -31,6 +31,8 @@ import time
 import ctypes
 import ctypes.wintypes
 import struct
+import urllib.parse      # 查词链接里的单词要转义（可能有空格 / & / #）
+import webbrowser        # 点放大镜 → 默认浏览器打开有道词典
 import zlib
 import tkinter as tk
 from tkinter import ttk, font as tkfont, messagebox
@@ -52,7 +54,7 @@ DEFAULT_BOOK_NAME = os.path.basename(DATA_CSV)
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 FONT_DIR = os.path.join(APP_DIR, "fonts")
 
-# 大写锁定：开着的时候弹幕层不再鼠标穿透，可以悬停看音标、点星收藏
+# 大写锁定：开着的时候弹幕层不再鼠标穿透，可以悬停看音标、点放大镜查词、点星收藏
 VK_CAPITAL = 0x14
 CAPS_POLL_MS = 100        # 轮询大写锁定的周期（毫秒）；要短于一次按键，才能抓到按下沿
 HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
@@ -125,6 +127,13 @@ CLR_STAR_ON    = "#FFC53D"  # 已收藏：实心金黄
 CLR_STAR_OFF   = "#E9E9E9"  # 未收藏：实心浅灰
 CLR_STAR_ON_BR = "#B07A00"  # 星的描边：花底上没描边就发飘
 CLR_STAR_OFF_BR = "#7A7A7A"
+# 放大镜（查词）图标：跟未收藏的星同一档浅灰 —— 信息行里这俩是同级操作，
+# 靠形状区分就够了（一个实心星、一个线稿镜片），再换个颜色反而显得没整理。
+CLR_DICT       = "#E9E9E9"
+CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
+
+# 点放大镜要跳的查词页（{w} 是转义后的单词）
+DICT_URL = "https://dict.youdao.com/result?word={w}&lang=en"
 
 DEFAULT_CONFIG = {
     # 弹幕出现的纵向区域 = 屏幕顶部 15% 高度的一条带（不是"字号占 15%"）
@@ -1459,7 +1468,7 @@ class DanmakuLayer(object):
         if cx < -6 or cy < -6 or cx > self.sw + 6 or cy > self.band_h + 6:
             return None
         # 已在悬停的那条**优先判定**，而且两步都走：
-        # ① 整块信息框 —— 鼠标移到下面的音标/星上不算离开（否则刚想点星就先失焦）；
+        # ① 整块信息框 —— 鼠标移到下面的音标/图标上不算离开（否则刚想点星就先失焦）；
         # ② 文字本身 —— hitbox 万一因绘制失败缺了，还有个兜底。
         # 这一步必须排在遍历之前：悬停期间允许别的弹幕从它身后穿过，
         # 那条路过的即使此刻也压在光标下，也不该把焦点抢走 ——
@@ -1489,6 +1498,8 @@ class DanmakuLayer(object):
             return
         it.pop("_hitbox", None)
         it.pop("_star_box", None)
+        it.pop("_dict_box", None)
+        it.pop("_dict_hl", None)
         w = it.get("word")
         if self.fav_state and w:
             it["_fav"] = bool(self.fav_state(w.get("word")))
@@ -1680,9 +1691,13 @@ class DanmakuLayer(object):
         # 而雅黑本身这些 IPA 符号一个不缺（`_debug\\_fonttest.py` 渲染对照过）。
         phf = self._font(PHON_FACE, fpx, False)
         sr = max(8, int(fp * 0.32))
+        mr = max(7, int(fp * 0.30))       # 放大镜：比星略小一号，让 ★ 还是主角
+        igap = max(8, int(fp * 0.22))     # 两个**图标**之间挨得近一点，
+                                          # 音标 ↔ 图标那一段用 gap，一眼看得出是两组
 
         # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下
-        need = ipad + (phf.measure(acc) if acc else 0) + gap + sr * 2 + ipad
+        need = (ipad + (phf.measure(acc) if acc else 0) + gap
+                + mr * 2 + igap + sr * 2 + ipad)
         if bx1 - bx0 < need:
             bx1 = bx0 + need
         bx1 = min(bx1, float(self.sw - 2))
@@ -1700,8 +1715,11 @@ class DanmakuLayer(object):
         except Exception:
             pass
 
+        # 右端依次是「放大镜 ★」：★ 贴着右留白，放大镜再往左退一步
+        scx = bx1 - ipad - sr
+        dcx = scx - sr - igap - mr
         txt_l = bx0 + ipad
-        txt_r = bx1 - ipad - sr * 2 - gap
+        txt_r = dcx - mr - gap
         # 光学修正：anchor="w" 是把**字体行盒**按 cy 居中，而音标的墨迹（x 高区
         # 加上 / 和 p 的下伸）整体偏下，实测比行盒中心低约 0.15em。不修的话
         # 音标看着比右边的星低半个笔画。星星是几何图形，它就在 cy 上。
@@ -1712,9 +1730,37 @@ class DanmakuLayer(object):
             if seg:
                 c.create_text(txt_l, ty, text=seg, anchor="w", fill=CLR_HOVER_TEXT,
                               font=phf, tags=("hoverui",))
+        # 查词放大镜：空心镜片 + 45° 手柄的**线稿**。做成实心块会跟右边的 ★ 糊成一坨，
+        # 而且一实心就丢了"这是个放大镜"的意思。
+        # 手柄是往右下伸的，圆心得先往左上补一段（这里的 -0.219·r 只是个起手估算）：
+        # 真正居中靠下面那步"按画出来的墨迹再把整体挪正" —— 线宽会往外扩、
+        # 描边到底算不算进 bbox 也没个准数，在纸上凑系数不如让像素自己说话。
+        cr = mr * 0.62                                  # 镜片半径
+        ccx, ccy = dcx - mr * 0.219, cy - mr * 0.219    # 镜片圆心
+        lw = max(1.5, mr * 0.26)
+        dcl = CLR_DICT_HL if it.get("_dict_hl") else CLR_DICT
+        # 不写 fill：留空才像镜子，填满了就跟旁边的星打架
+        id_oval = c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
+                                outline=dcl, width=lw, tags=("hoverui",))
+        id_hand = c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
+                                ccx + cr * 0.707 + mr * 0.62,
+                                ccy + cr * 0.707 + mr * 0.62,
+                                fill=dcl, width=lw * 1.25, capstyle="round",
+                                tags=("hoverui",))
+        try:
+            gb = c.bbox(id_oval, id_hand)
+            if gb:
+                c.move(id_oval, dcx - (gb[0] + gb[2]) / 2.0,
+                       cy - (gb[1] + gb[3]) / 2.0)
+                c.move(id_hand, dcx - (gb[0] + gb[2]) / 2.0,
+                       cy - (gb[1] + gb[3]) / 2.0)
+        except Exception:
+            pass
+        # 命中框按**整块图标**算，不按线条：镜片中间那一大片空当也是该有反应的地方，
+        # 只判线条的话鼠标落在正中间反而不算点中。
+        it["_dict_box"] = (dcx - mr - 3, cy - mr - 3, dcx + mr + 3, cy + mr + 3)
         # 收藏星：一律实心。空心星看着更雅，但中间的可点区域是空的 ——
         # 抠洞像素会把点击漏给桌面，所以宁可用实心保证"点了就有反应"。
-        scx = bx1 - ipad - sr
         fav = bool(it.get("_fav"))
         c.create_polygon(self._star_pts(scx, cy, sr),
                          fill=CLR_STAR_ON if fav else CLR_STAR_OFF,
@@ -1723,15 +1769,75 @@ class DanmakuLayer(object):
         it["_star_box"] = (scx - sr - 3, cy - sr - 3, scx + sr + 3, cy + sr + 3)
         it["_hitbox"] = (bx0 - 6, top - 6, bx1 + 6, bot + 6)
 
+    def _redraw_hover(self, it):
+        """
+        原地重画信息框（点了图标要立刻给反馈时用）。
+
+        ⚠️ 必须先把旧的 hoverui 删掉：_draw_hover 是在原框上**再叠一层**的，
+        而 stipple 灰棋盘叠两遍就不再是 gray50 了 —— 两次各填一半空白像素，
+        合起来接近实心，点一次图标整块框肉眼可见地加深一档。
+        """
+        try:
+            self.canvas.delete("hoverui")
+        except Exception:
+            pass
+        try:
+            self._draw_hover(it)
+        except Exception:
+            pass
+
+    def _open_dict(self, it):
+        """
+        点放大镜 → 默认浏览器打开有道词典这一条。
+
+        单词要 urlencode：词表里可能带空格或 & / #，直接拼进 URL 会被浏览器
+        当成参数分隔符，后半截整个吃掉。
+        """
+        w = ((it.get("word") or {}).get("word") or "").strip()
+        if not w:
+            return False
+        url = DICT_URL.format(w=urllib.parse.quote(w))
+        try:
+            if webbrowser.open(url):
+                return True
+        except Exception:
+            pass
+        try:
+            os.startfile(url)       # webbrowser 认不出默认浏览器时的兜底
+            return True
+        except Exception:
+            return False
+
+    def _dict_unhighlight(self, it):
+        """放大镜那一下高亮收回来（那时这条说不定已经飘走 / 被删了，全都得兜住）。"""
+        if not it.get("_dict_hl"):
+            return
+        it.pop("_dict_hl", None)
+        if self._hover is it:
+            self._redraw_hover(it)
+
     def _on_canvas_click(self, e):
-        """点星星 = 收藏 / 取消收藏（只在可交互模式下生效）。"""
-        if not self.interactive or not self.fav_toggle:
+        """
+        信息行右侧两个图标：放大镜 = 查词，★ = 收藏 / 取消收藏。
+        （只有可交互模式下才收得到点击；悬停靠定时轮询光标，不用 <Motion>）
+        """
+        if not self.interactive:
             return
         it = self._hover if self._hover is not None else self._item_at_cursor()
         if it is None:
             return
+        # 放大镜先判、也单独往上提：它不依赖收藏功能能不能用
+        db = it.get("_dict_box")
+        if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
+            if self._open_dict(it):
+                it["_dict_hl"] = True
+                self._redraw_hover(it)
+                self.win.after(220, lambda t=it: self._dict_unhighlight(t))
+            return
         sb = it.get("_star_box")
         if not sb or not (sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]):
+            return
+        if not self.fav_toggle:
             return
         w = it.get("word")
         if not w:
@@ -1740,10 +1846,7 @@ class DanmakuLayer(object):
             it["_fav"] = bool(self.fav_toggle(w))
         except Exception:
             return
-        try:
-            self._draw_hover(it)      # 立刻把星的颜色换掉，给出即时反馈
-        except Exception:
-            pass
+        self._redraw_hover(it)      # 立刻把星的颜色换掉，给出即时反馈
 
     def clear(self):
         self._set_hover(None)
