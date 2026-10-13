@@ -114,6 +114,9 @@ CLR_MUTED     = "#8C7A72"
 # —— 弹幕悬停信息框（悬停时才出现的那块）——
 # 底色故意压得很深：stipple 只填一半像素，另一半透出桌面，
 # 底越深，白字（尤其是没有描边的音标）压在花底上才越看得清。
+# 密度就定在 gray50（实测**正好 50% 像素填充**，`_debug\_stippleprobe.py` 有实拍统计）。
+# ⚠️ 别自作聪明换成 gray75/gray12：2026-10-13 试过 gray75（75% 填充、只漏 1/4），
+# 宇看完要求**改回 gray50** —— 他要的就是这层"能看见后面"的通透感。
 CLR_HOVER_BG   = "#262626"
 CLR_HOVER_BRD  = "#EDEDED"  # 圆角描边
 CLR_HOVER_TEXT = "#FFFFFF"  # 音标字色
@@ -1223,7 +1226,6 @@ class DanmakuLayer(object):
             self._set_hover(None)
         self.items.remove(it)
         self.canvas.delete(it["tag"])
-        self._drop_park_ui(it)
         return True
 
     def spawn(self, text, color=None, replace_oldest=False, word=None):
@@ -1370,7 +1372,6 @@ class DanmakuLayer(object):
                 if it is self._hover:
                     self._set_hover(None)
                 self.canvas.delete(it["tag"])
-                self._drop_park_ui(it)
                 del self.items[i]        # 别用 list() 再 remove()，就地删更省
             else:
                 i += 1
@@ -1451,19 +1452,11 @@ class DanmakuLayer(object):
         if old is not None and old is not it:
             self._unfreeze(old)      # 可能转成 waiting：原地排队等挡路的过去
         self._hover = it
-        # 悬停结束、但那条还在排队让路 —— 灰框得**继续挂着**，一直挂到它真的动起来。
-        # 一撤框就变成「停着不动的裸单词」，看着像卡死了。
-        if old is not None and old is not it and old.get("waiting"):
-            self._park_hover_ui(old)
         try:
             self.canvas.delete("hoverui")
         except Exception:
             pass
         if it is None:
-            return
-        if it.get("_park_tag"):
-            # 又悬停回还在排队的那条：它一直没动，框也不用重画，认领回来就行
-            self._claim_hover_ui(it)
             return
         it.pop("_hitbox", None)
         it.pop("_star_box", None)
@@ -1475,46 +1468,6 @@ class DanmakuLayer(object):
             self._draw_hover(it)
         except Exception:
             pass
-
-    # -- 灰框的「留存 / 认领 / 撤下」 ------------------------------------
-    # 排队让路的那条是静止的，但它的灰框要一直挂着。而框默认只挂在全局
-    # "hoverui" 这一个 tag 上，下一次 _set_hover 会把整组删掉 —— 所以留存时
-    # 必须改挂到这一条自己的 tag 上，等它恢复移动了再撤。
-
-    def _park_hover_ui(self, it):
-        """把当前信息框从 hoverui 上摘下来，改挂到这一条的私有 tag 上留存。"""
-        self._seq += 1
-        tag = "hoveruip%d" % self._seq
-        try:
-            for i in self.canvas.find_withtag("hoverui"):
-                self.canvas.dtag(i, "hoverui")
-                self.canvas.addtag_withtag(tag, i)
-                self.canvas.addtag_withtag("hoveruipark", i)
-        except Exception:
-            return
-        it["_park_tag"] = tag
-
-    def _claim_hover_ui(self, it):
-        """重新悬停回等待中的那条：把它自己那块框认领成当前 hoverui。"""
-        tag = it.pop("_park_tag", None)
-        if not tag:
-            return
-        try:
-            for i in self.canvas.find_withtag(tag):
-                self.canvas.dtag(i, tag)
-                self.canvas.dtag(i, "hoveruipark")
-                self.canvas.addtag_withtag("hoverui", i)
-        except Exception:
-            pass
-
-    def _drop_park_ui(self, it):
-        """这一条恢复移动（或被删掉）了 —— 挂着的灰框到此为止。"""
-        tag = it.pop("_park_tag", None)
-        if tag:
-            try:
-                self.canvas.delete(tag)
-            except Exception:
-                pass
 
     def _freeze(self, it):
         """
@@ -1534,13 +1487,7 @@ class DanmakuLayer(object):
         把「悬停信息框 + 被悬停的那一条」顶到最上层。
         新弹幕是后画的，天然压在老弹幕上面；悬停期间同轨道允许后来者穿过，
         所以每放一条都要把焦点这一组重新提上来，否则它会被路过的弹幕盖住。
-        排队让路期间挂着的那些灰框（hoveruipark）同样要提 —— 它们此刻没有焦点，
-        但还在画面上，被路过的弹幕盖掉一半比留着更丑。
         """
-        try:
-            self.canvas.tag_raise("hoveruipark")
-        except Exception:
-            pass
         if self._hover is None:
             return
         try:
@@ -1610,7 +1557,6 @@ class DanmakuLayer(object):
                 it["frozen"] = False
                 self.canvas.dtag(it["tag"], "dmfrozen")
                 self.canvas.addtag_withtag("dm", it["tag"])
-                self._drop_park_ui(it)      # 真动起来了 —— 灰框这时候才收
 
     # -- 悬停信息框的绘制 -----------------------------------------
 
@@ -1651,6 +1597,8 @@ class DanmakuLayer(object):
         而 stipple 是把填充按棋盘格漏空，漏空的像素露出画布底色 ——
         那正是色键色，会被整块抠掉。于是一半像素直接透出桌面，
         视觉上就是半透明的，而且是真·逐像素（不是靠猜灰阶）。
+        密度定死 gray50（实测正好漏一半，`_debug\\_stippleprobe.py`）；
+        试过 gray75 被宇否掉，别再动它。
         """
         c = self.canvas
         bb = c.bbox(it["tag"])
@@ -1772,7 +1720,6 @@ class DanmakuLayer(object):
         self._set_hover(None)
         for it in list(self.items):
             self.canvas.delete(it["tag"])
-            self._drop_park_ui(it)
         self.items = []
 
     def destroy(self):
