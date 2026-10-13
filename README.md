@@ -126,7 +126,7 @@ CapsLock 开着的时候，**鼠标悬停到任意一条弹幕上**：
   不然一解冻就和压在身上的那条糊成一团。
 
 收藏的词会**自动整理进 `books\已收藏单词.csv`**，格式与其它词书完全一致
-（UTF-8 BOM + CRLF + 按字母序，列序 `topic_id,word,accent,mean_cn,freq,word_length,is_favorite`），
+（UTF-8 BOM + CRLF + 按字母序，列序 `word,accent,mean_cn`），
 所以在面板的**词书下拉里能直接选 `已收藏单词` 当弹幕词书** —— 收藏完切过去就是"只弹我收藏的词"。
 收藏夹是实时重载的：正用着它的时候又收藏了一个词，不用重启就生效。
 
