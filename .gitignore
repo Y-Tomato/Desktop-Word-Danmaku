@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# 运行时生成：个人配置、崩溃日志、本机快捷方式
+config.json
+error.log
+*.lnk
+
+# 个人收藏夹（首次运行会自动建一个空的）
+books/已收藏单词.csv
