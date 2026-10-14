@@ -463,7 +463,7 @@ class HoverIconLayoutTest(unittest.TestCase):
     SR, MR, HR, IGAP, IPAD, GAP = 20, 18, 20, 14, 40, 20
 
     def _lay(self, bx1=1000.0):
-        return danmaku.hover_icons(bx1, 100.0, self.IPAD, self.GAP,
+        return danmaku.hover_icons(bx1, self.IPAD, self.GAP,
                                    self.SR, self.MR, self.HR, self.IGAP)
 
     def test_left_to_right_order(self):
@@ -487,7 +487,7 @@ class HoverIconLayoutTest(unittest.TestCase):
         """
         bx0, acc_w = 0.0, 120.0
         need = self.IPAD + acc_w + self._lay()["back"]
-        ic = danmaku.hover_icons(bx0 + need, 100.0, self.IPAD, self.GAP,
+        ic = danmaku.hover_icons(bx0 + need, self.IPAD, self.GAP,
                                  self.SR, self.MR, self.HR, self.IGAP)
         self.assertAlmostEqual(ic["txt_r"] - (bx0 + self.IPAD), acc_w)
         self.assertGreater(ic["txt_r"], bx0)
@@ -496,7 +496,7 @@ class HoverIconLayoutTest(unittest.TestCase):
         bx0, acc_w = 0.0, 120.0
         need = self.IPAD + acc_w + self._lay()["back"]
         bx1 = bx0 + need
-        ic = danmaku.hover_icons(bx1, 100.0, self.IPAD, self.GAP,
+        ic = danmaku.hover_icons(bx1, self.IPAD, self.GAP,
                                  self.SR, self.MR, self.HR, self.IGAP)
         for key, r in (("sound", self.HR), ("dict", self.MR), ("star", self.SR)):
             self.assertGreaterEqual(ic[key] - r, bx0, "%s 跑到框左边外面了" % key)
@@ -537,7 +537,7 @@ class HoverIconLayoutTest(unittest.TestCase):
             layer = danmaku.DanmakuLayer(root, cfg, 1200, 800, danmaku.FONTS)
             layer.canvas.delete("all")
             sr, mr, hr = 20, 18, 20
-            ic = danmaku.hover_icons(900.0, 60.0, 30, 20, sr, mr, hr, 14)
+            ic = danmaku.hover_icons(900.0, 30, 20, sr, mr, hr, 14)
             c = layer.canvas
             dids = [c.create_oval(ic["dict"] - 11, 49, ic["dict"] + 11, 71,
                                   outline="#fff", width=5),

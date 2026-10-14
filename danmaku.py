@@ -192,6 +192,17 @@ DEFAULT_CONFIG = {
     "handle_y": -1,
 }
 
+
+def cfg_num(cfg, key):
+    """
+    读一个**数值**配置：键缺失时退回出厂值。
+
+    兜底值别就地抄字面量（`cfg.get("max_on_screen", 1)`）—— 抄下来的那份迟早和
+    DEFAULT_CONFIG 对不上，而 _load_config 保证键都在、它平时压根不生效，真缺了键
+    才会静悄悄地跑偏。字符串型的键（band_mode / font_face / text_color）别用它。
+    """
+    return cfg.get(key, DEFAULT_CONFIG[key])
+
 POS_RE = re.compile(r"^\s*([a-zA-Z]{1,6}\.)\s*(.+)$")
 
 # 「词性 + 后面的空白」。必须先把 1~n 个空格压成 1 个：百词斩的数据里 acquire 是
@@ -1240,7 +1251,7 @@ def build_text(w, cfg):
     picked = pick_meanings(
         w["senses"],
         max_total=int(cfg.get("max_meanings", 2)),
-        max_pos=int(cfg.get("max_pos", 2)),
+        max_pos=int(cfg_num(cfg, "max_pos")),
         per_pos=int(cfg.get("per_pos_meanings", 2)),
     )
     segs = []
@@ -1270,7 +1281,7 @@ def text_cache_key(book_path, word, cfg):
 
 # ------------------------------------------------------------ 悬停信息行布局
 
-def hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap):
+def hover_icons(bx1, ipad, gap, sr, mr, hr, igap):
     """
     信息行右端三个图标的横向位置：从左到右 **喇叭 · 放大镜 · 星**。
 
@@ -1278,7 +1289,7 @@ def hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap):
     一遍的算式，一旦对不上就是"框变宽了但图标还按老位置画"——图标被画到框外，
     不报错、只是看着别扭，靠肉眼很难发现。现在两边都从这一份坐标推出来。
 
-    返回 dict：三个中心 x（y 都是 cy）、音标可用的右界 txt_r、以及 `back`
+    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向）、音标可用的右界 txt_r、以及 `back`
     ——「从框右沿退回音标右界」的宽度，调用方用它算框至少要撑多宽。
     """
     star_cx = bx1 - ipad - sr
@@ -1381,7 +1392,7 @@ class DanmakuLayer(object):
         注意 through 也必须一起比 —— 从「穿透」切回「不穿透」时 alpha 常常恰好
         没变，只比 alpha 的话这次切换就被跳过了，弹幕永远点不着。
         """
-        a = int(float(self.cfg.get("opacity", 0.92)) * 255)
+        a = int(float(cfg_num(self.cfg, "opacity")) * 255)
         through = not self.interactive
         if a == self._applied_alpha and through == self._applied_through:
             return
@@ -1418,7 +1429,7 @@ class DanmakuLayer(object):
     # -- 布局 ----------------------------------------------------
 
     def _font_px(self):
-        return max(10, int(self.sh * float(self.cfg.get("font_ratio", 0.036))))
+        return max(10, int(self.sh * float(cfg_num(self.cfg, "font_ratio"))))
 
     def _band_span(self):
         """弹幕带的像素高度与纵向起点。"""
@@ -1490,7 +1501,7 @@ class DanmakuLayer(object):
         margin = max(2, int(band * 0.05))
         ymax = max(margin, band - line_h - margin)
         slots = max(1, int((band - 2 * margin) // line_h))
-        if int(self.cfg.get("max_on_screen", 1)) <= 1 or slots <= 1:
+        if int(cfg_num(self.cfg, "max_on_screen")) <= 1 or slots <= 1:
             y = margin if ymax <= margin else random.uniform(margin, ymax)
             return -1, y
 
@@ -1544,7 +1555,7 @@ class DanmakuLayer(object):
         点收藏时还要靠它把整行写进 books\\已收藏单词.csv，所以必须一起带上。
         """
         cfg = self.cfg
-        max_on = int(cfg.get("max_on_screen", 1))
+        max_on = int(cfg_num(cfg, "max_on_screen"))
         if len(self.items) >= max_on:
             if not replace_oldest:
                 return False
@@ -1649,7 +1660,7 @@ class DanmakuLayer(object):
             self._acc = 0.0
             return
         dt = min(dt, 0.25)   # 卡顿/休眠后不要一次跳很远
-        self._acc += self.sw * float(self.cfg.get("speed_ratio", 0.11)) * dt
+        self._acc += self.sw * float(cfg_num(self.cfg, "speed_ratio")) * dt
         step = int(self._acc)        # 只按整数像素移动：避免亚像素导致每帧重新抗锯齿
         if step < 1:
             return
@@ -2136,12 +2147,12 @@ class DanmakuLayer(object):
         # 一旦对不上就是框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
         # back 与 bx1 无关，所以先用当前 bx1 要一次宽度、撑完框再要一次位置。
         need = (ipad + (phf.measure(acc) if acc else 0)
-                + hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap)["back"])
+                + hover_icons(bx1, ipad, gap, sr, mr, hr, igap)["back"])
         if bx1 - bx0 < need:
             bx1 = bx0 + need
         bx1 = min(bx1, float(self.sw - 2))
         bx0 = max(0.0, min(bx0, bx1 - 40))
-        ic = hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap)
+        ic = hover_icons(bx1, ipad, gap, sr, mr, hr, igap)
 
         box = self._round_rect(bx0, top, bx1, bot, max(6, int(fp * 0.22)),
                                fill=CLR_HOVER_BG, stipple="gray50",
@@ -2841,7 +2852,7 @@ class DanmakuApp(object):
         # 单词 + 词性 + 释义，音标一律在悬停信息框里看。顺手清掉老配置的遗留键。
         cfg.pop("show_phonetic", None)
         # 固定间隔下同屏允许几条；但旧配置把上限压成 1 会让新行为看不出变化
-        if cfg.get("one_at_a_time") and int(cfg.get("max_on_screen", 1)) <= 1:
+        if cfg.get("one_at_a_time") and int(cfg_num(cfg, "max_on_screen")) <= 1:
             cfg["one_at_a_time"] = False
             cfg["max_on_screen"] = DEFAULT_CONFIG["max_on_screen"]
         return cfg
