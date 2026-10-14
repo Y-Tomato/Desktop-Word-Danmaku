@@ -455,16 +455,22 @@ class AudioLookupTest(unittest.TestCase):
 
 class HoverIconLayoutTest(unittest.TestCase):
     """
-    信息行「音标 → 喇叭 · 放大镜 · 星」的坐标。
+    信息行「音标 → 喇叭 … 放大镜 · 星」的坐标。
+
+    位置是宇 2026-10-14 拿实拍定的：**喇叭跟着音标走**（读音算音标那一组的），
+    **放大镜 / 星钉在框右端**不动，中间那段空白随音标长短伸缩。
 
     这些数字以前是**两套**各写一遍的算式（框要撑多宽 / 图标画在哪），一旦对不上
     就是图标静悄悄跑到框外。下面几条断言专门盯这类漂移。
     """
 
-    SR, MR, HR, IGAP, IPAD, TGAP = 20, 18, 20, 14, 40, 14
+    SR, MR, HR, IGAP = 20, 18, 20, 14
+    AX, RX = 100.0, 600.0        # 喇叭左沿的锚点 / 星右沿的锚点
 
-    def _lay(self, ax=100.0):
-        return danmaku.hover_icons(ax, self.SR, self.MR, self.HR, self.IGAP)
+    def _lay(self, ax=None, rx=None):
+        return danmaku.hover_icons(self.AX if ax is None else ax,
+                                   self.RX if rx is None else rx,
+                                   self.SR, self.MR, self.HR, self.IGAP)
 
     def test_left_to_right_order(self):
         ic = self._lay()
@@ -478,34 +484,53 @@ class HoverIconLayoutTest(unittest.TestCase):
 
     def test_speaker_follows_the_phonetic(self):
         """
-        宇 2026-10-14 指出的那条：喇叭以前钉在**框的右端**，跟音标中间空出一大截，
-        看着跟"查词 / 收藏"才是一组。现在它跟着音标走 —— 音标越宽，喇叭越往右。
+        宇 2026-10-14 拍的位置：音标越宽喇叭越往右 —— 读音算音标那一组的。
+        （以前喇叭钉在框的右端、跟音标中间空出一大截，看着跟"查词 / 收藏"才是
+        一组；后来改成三个连成一排跟着音标走，在宽框里仍然像挤在一起。）
         """
-        a = self._lay(100.0)
-        b = self._lay(180.0)
+        a = self._lay(ax=100.0)
+        b = self._lay(ax=180.0)
         self.assertAlmostEqual(b["sound"] - a["sound"], 80.0)
-        self.assertAlmostEqual(b["star"] - a["star"], 80.0)
+
+    def test_star_right_edge_sits_on_the_box_edge(self):
+        """星的**右沿**正好落在 rx 上 —— 放大镜和星钉在框右端，不跟着音标跑。"""
+        rx = 777.0
+        self.assertAlmostEqual(self._lay(rx=rx)["star"] + self.SR, rx)
+
+    def test_right_pair_does_not_move_with_the_phonetic(self):
+        """放大镜 / 星钉死在右端：音标宽窄跟它们无关（跟上面那条是一对）。"""
+        a = self._lay(ax=100.0)
+        b = self._lay(ax=180.0)
+        self.assertAlmostEqual(b["dict"] - a["dict"], 0.0)
+        self.assertAlmostEqual(b["star"] - a["star"], 0.0)
 
     def test_icon_gaps_match_the_constants(self):
         ic = self._lay()
-        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.IGAP + self.MR)
-        self.assertAlmostEqual(ic["star"] - ic["dict"], self.MR + self.IGAP + self.SR)
+        self.assertAlmostEqual(ic["star"] - ic["dict"], self.SR + self.IGAP + self.MR)
 
-    def test_run_is_the_whole_group(self):
-        """run = 从喇叭左沿到星右沿的总宽；调用方拿它反推音标还能画多宽。"""
-        ax = 100.0
-        ic = self._lay(ax)
-        self.assertAlmostEqual(ic["star"] + self.SR - ax, ic["run"])
+    def test_group_widths_are_the_two_runs(self):
+        """两组的宽度出自 icon_group_widths()，跟画出来的坐标对得上。"""
+        snd_w, right_w = danmaku.icon_group_widths(
+            self.SR, self.MR, self.HR, self.IGAP)
+        self.assertAlmostEqual(snd_w, self.HR * 2)
+        self.assertAlmostEqual(right_w, self.MR * 2 + self.IGAP + self.SR * 2)
+        ic = self._lay(ax=400.0, rx=600.0)
+        # 星右沿 − 喇叭左沿 = 喇叭组 + 中间那段空白 + 放大镜/星那一组
+        self.assertAlmostEqual(
+            (ic["star"] + self.SR) - (ic["sound"] - self.HR),
+            snd_w + (ic["dict"] - self.MR - (ic["sound"] + self.HR)) + right_w)
 
     def test_hit_boxes_do_not_overlap(self):
         """
         三个命中框各自外扩 3px，图标之间的空当（igap）要留得比这更大，
         否则会出现"点两个图标中间，却触发了其中一个"。
         """
-        ic = self._lay()
+        ic = self._lay(ax=400.0, rx=600.0)
         self.assertGreater(self.IGAP, 6)
-        self.assertGreaterEqual(ic["dict"] - self.MR - 3 - (ic["sound"] + self.HR + 3), 0)
+        # 放大镜 ↔ 星是固定的 IGAP 撑开
         self.assertGreaterEqual(ic["star"] - self.SR - 3 - (ic["dict"] + self.MR + 3), 0)
+        # 喇叭 ↔ 放大镜之间是"随音标伸缩的空白"，框够宽时就绝不重叠
+        self.assertGreaterEqual(ic["dict"] - self.MR - 3 - (ic["sound"] + self.HR + 3), 0)
 
     def test_speaker_fits_in_its_half_size(self):
         """喇叭的顶点都该落在 ±r 里，_icon_box 的退路（按 r 估框）才是对的。"""
@@ -534,7 +559,7 @@ class HoverIconLayoutTest(unittest.TestCase):
             layer = danmaku.DanmakuLayer(root, cfg, 1200, 800, danmaku.FONTS)
             layer.canvas.delete("all")
             sr, mr, hr = 20, 18, 20
-            ic = danmaku.hover_icons(880.0, sr, mr, hr, 14)
+            ic = danmaku.hover_icons(880.0, 1000.0, sr, mr, hr, 14)
             c = layer.canvas
             dids = [c.create_oval(ic["dict"] - 11, 49, ic["dict"] + 11, 71,
                                   outline="#fff", width=5),
@@ -550,6 +575,82 @@ class HoverIconLayoutTest(unittest.TestCase):
                 root.destroy()
             except Exception:
                 pass
+
+# ---------------------------------------------------------------- 点击去重
+
+class _FakeEvent(object):
+    """_on_canvas_click 只用到 .x / .y。"""
+
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class HoverClickDedupTest(unittest.TestCase):
+    """
+    兜底轮询和原生点击是**同一次物理点击**的两条路：谁先到都得只生效一次。
+
+    宇 2026-10-14 报的"收藏要双击才有效"就是这儿漏了一遍：图标是实心像素时原生
+    先到、这一下早处理完了，兜底下一拍又补了一笔，两次互相抵掉 —— 第一下白点，
+    第二下（250ms 内、原生被去重掉）反而净生效，看着就是"要双击"。
+
+    ⚠️ 这条只能靠替换掉按键状态来测：真按下鼠标才有的时序，探针造不出来。
+    """
+
+    BOX = (100, 100, 140, 140)        # 假装星就画在这儿
+    XY = (120, 120)
+
+    def _layer(self):
+        try:
+            root = danmaku.tk.Tk()
+        except Exception as e:
+            raise unittest.SkipTest("没有可用的 Tk 环境：%r" % (e,))
+        root.withdraw()
+        layer = danmaku.DanmakuLayer(root, dict(danmaku.DEFAULT_CONFIG),
+                                     1200, 800, danmaku.FONTS)
+        layer.interactive = True
+        layer._cursor_xy = lambda: self.XY
+        it = {"tag": "dm1", "word": {"word": "alpha"}, "frozen": False,
+              "_sound_box": None, "_dict_box": None, "_star_box": self.BOX}
+        layer.items = [it]
+        layer._hover = it
+        return root, layer, it
+
+    def _run_poll(self, layer, states):
+        """按给定的按键状态序列跑几拍 _click_poll（不排真定时器）。"""
+        saved = danmaku._lbutton_state
+        danmaku._lbutton_state = lambda: states.pop(0) if states else 0
+        try:
+            for _ in range(len(states) + 1):
+                layer._click_poll()
+        finally:
+            danmaku._lbutton_state = saved
+
+    def test_native_first_then_fallback_does_not_repeat(self):
+        root, layer, it = self._layer()
+        try:
+            calls = []
+            layer.fav_toggle = lambda w: (calls.append("star"), True)[1]
+            layer.fav_state = lambda name: False
+            layer._on_canvas_click(_FakeEvent(*self.XY))     # 原生先到
+            self.assertEqual(calls, ["star"], "原生那一下没生效")
+            # 兜底接着跑：先"刚按下"，再"还按着"，最后松开
+            self._run_poll(layer, [0x8001, 0x8000, 0])
+            self.assertEqual(calls, ["star"], "同一次点击被兜底又点了一遍")
+        finally:
+            root.destroy()
+
+    def test_transparent_pixel_is_caught_by_the_fallback(self):
+        """透明像素（镜片圆心、空心星内部）窗口收不到原生 —— 只有兜底能接。"""
+        root, layer, it = self._layer()
+        try:
+            calls = []
+            layer.fav_toggle = lambda w: (calls.append("star"), True)[1]
+            layer.fav_state = lambda name: False
+            self._run_poll(layer, [0x8001, 0x8000, 0])
+            self.assertEqual(calls, ["star"], "兜底没接住这一下")
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

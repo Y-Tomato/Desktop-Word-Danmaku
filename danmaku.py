@@ -70,6 +70,20 @@ CLICK_POLL_MS = 40        # 全局左键兜底的轮询周期（毫秒），见 
 CLICK_DEDUP_S = 0.25      # 同一物理点击的去重窗口（秒）：窗口原生收过的那一下，
                           # 兜底得忍住别再走一遍
 
+
+def _lbutton_state():
+    """
+    左键的 `GetAsyncKeyState` 原始值（高位=现在按着，低位="上次问过之后按下过"）。
+
+    抽成模块级函数只为留一个 **seam**：真按下鼠标才能复现"兜底把原生已经处理过的
+    那一下又点了一遍"，探针没法手工造出那个时序。把它换掉就能确定性地单测
+    `_click_poll` 的去重（见 tests\test_danmaku.py 的 HoverClickDedupTest）。
+    """
+    try:
+        return int(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON)) & 0xFFFF
+    except Exception:
+        return 0
+
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
 # 让路排队的最长等待（秒）。只有当压在身上的那条在**左边**（我往左走反而会追上它）
@@ -153,12 +167,12 @@ CLR_MUTED     = "#8C7A72"
 CLR_HOVER_BG   = "#262626"
 CLR_HOVER_BRD  = "#EDEDED"  # 圆角描边
 CLR_HOVER_TEXT = "#FFFFFF"  # 音标字色
-CLR_STAR_ON    = "#FFC53D"  # 已收藏：实心金黄
-CLR_STAR_OFF   = "#E9E9E9"  # 未收藏：实心浅灰
-CLR_STAR_ON_BR = "#B07A00"  # 星的描边：花底上没描边就发飘
-CLR_STAR_OFF_BR = "#7A7A7A"
+# 星是**线稿**（2026-10-14 由实心改）：只描边不填色，笔宽跟放大镜一档 ——
+# 信息行三个图标统一成"同一支笔画出来的一套"。颜色就落在描边上：
+CLR_STAR_ON    = "#FFC53D"  # 已收藏：金黄
+CLR_STAR_OFF   = "#E9E9E9"  # 未收藏：浅灰（跟放大镜同色，同级操作靠形状区分）
 # 放大镜（查词）图标：跟未收藏的星同一档浅灰 —— 信息行里这俩是同级操作，
-# 靠形状区分就够了（一个实心星、一个线稿镜片），再换个颜色反而显得没整理。
+# 靠形状区分就够了（一个圆镜片、一个五角星），再换个颜色反而显得没整理。
 CLR_DICT       = "#E9E9E9"
 CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
 # 镜片**不填色** —— 留空才像块真玻璃（宇要的"透明镜面"，2026-10-14）。
@@ -1305,35 +1319,35 @@ def text_cache_key(book_path, word, cfg):
 
 # ------------------------------------------------------------ 悬停信息行布局
 
-def icon_run_width(sr, mr, hr, igap):
-    """三个图标从喇叭**左沿**到星**右沿**的总宽（与起点无关）。"""
-    return igap * 2 + hr * 2 + mr * 2 + sr * 2
-
-
-def hover_icons(ax, sr, mr, hr, igap):
+def icon_group_widths(sr, mr, hr, igap):
     """
-    信息行三个图标的横向中心：从左到右 **喇叭 · 放大镜 · 星**。
+    两组图标各占多宽：返回 (喇叭那一组, 放大镜 + 星那一组)。
 
-    ax 是**喇叭图标左沿**该落在的 x —— 由音标墨迹的右缘 + 一小段空隙算出来
-    （见 `_draw_hover`），于是喇叭永远贴着音标。以前这三个是钉在**框的右端**、
-    音标在左端，中间空出一大截：看着就像"喇叭跟放大镜是一组、跟音标没关系"
-    （宇 2026-10-14 指出来就是这个）。
+    ⚠️ 别在调用方手抄 `hr * 2` / `mr * 2 + igap + sr * 2`：以前"框要撑多宽"和
+    "图标画在哪"就是两套各写一遍的算式，一对不上图标就静悄悄跑到框外。
+    """
+    return hr * 2, mr * 2 + igap + sr * 2
 
-    抽成纯函数是为了能单测。以前 `need`（框要撑多宽）和三个中心点是**两套**各写
-    一遍的算式，一旦对不上就是"框变宽了但图标还按老位置画"——图标被画到框外，
-    不报错、只是看着别扭，靠肉眼很难发现。现在两边都从这一份坐标推出来。
 
-    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向），以及 `run`
-    —— 这一组从 ax 到最右沿占多宽，调用方用它反推"音标最多还能画多宽"、
-    "框至少要撑多宽"。
+def hover_icons(ax, rx, sr, mr, hr, igap):
+    """
+    信息行三个图标的横向中心：**喇叭跟着音标**、**放大镜和星钉在框右端**。
+
+    ax = 喇叭图标**左沿**该落的 x（= 音标墨迹右缘 + tgap，见 `_draw_hover`）
+    rx = 星图标**右沿**该落的 x（= 框右内沿）
+    igap = 放大镜 ↔ 星之间的空隙
+
+    位置是宇 2026-10-14 拿实拍图标定的：读音算音标那一组的，喇叭要紧跟音标；
+    查词 / 收藏钉在右端不动，中间那段空白随音标长短伸缩。
+    上一版三个是连成一排、整组跟着音标走 —— 在宽框里看着仍然像"喇叭跟搜索收藏
+    挤在一起"，所以改成两头各钉一头。
+
+    抽成纯函数是为了能单测（y 由调用方给，这里只管横向）。
     """
     snd_cx = ax + hr
-    dict_cx = snd_cx + hr + igap + mr
-    star_cx = dict_cx + mr + igap + sr
-    return {
-        "sound": snd_cx, "dict": dict_cx, "star": star_cx,
-        "run": icon_run_width(sr, mr, hr, igap),
-    }
+    star_cx = rx - sr
+    dict_cx = star_cx - sr - igap - mr
+    return {"sound": snd_cx, "dict": dict_cx, "star": star_cx}
 
 
 def speaker_pts(cx, cy, r):
@@ -1389,8 +1403,10 @@ class DanmakuLayer(object):
         self._click_job = None    # 全局左键兜底的轮询（见 _click_poll）
         self._btn_down = False    # 上一次看到的左键状态：只在"按下沿"触发一次
         self._pending_press = None  # 兜底看到的"按下沿"：先攒一拍，等原生先接
-        self._last_click = 0.0    # 最近一次点击生效的时刻（原生或兜底都有份）
-        self._last_click_xy = None  # 最近一次点击的坐标：判断是不是"同一下"
+        self._last_click = 0.0    # 最近一次**生效**的点击（原生或兜底都有份）
+        self._last_click_xy = None  # 那一下的坐标：判断"是不是同一下"
+        self._native_press_t = 0.0    # 原生窗口**真收到** <Button-1> 的时刻
+        self._native_press_xy = None  # 那一下的坐标：兜底据此判断"这一下轮不到我"
         self._seq = 0
         self._last_t = time.perf_counter()
         self._acc = 0.0       # 亚像素余量，保证每次只按整数像素移动
@@ -2211,36 +2227,43 @@ class DanmakuLayer(object):
         # （`_debug\_iconprobe.py` 会把三个图标的墨迹框量出来）：
         #   喇叭 1.52×hr：声波弧比锥体长得高，"高"是那道弧的高
         #   放大镜 2.00×mr：45° 斜手柄比镜片探得更低
-        #   星 2.09×sr：尖角的 miter 接缝又把墨迹撑出去一截（纯几何只有 1.81×）
+        #   星 1.81×sr + 描边一圈：五角星外接高就是 1.809r，圆角接缝不再往外扎
+        #     （以前星是**实心** + miter 尖角，墨迹又被尖角撑高约 6px，所以老系数
+        #      才要 /2.09 那种怪数 —— 改成线稿之后就回到几何值了）
         # 动了哪个图标的形状就得重新标一次；`_iconprobe.py` 里"三个图标一样高"
         # 那条断言就是盯它的。
         ih = max(12, int(fp * 0.55))
-        sr = max(7, int(ih / 2.09))       # ★
         mr = max(7, int(ih / 2.00))       # 放大镜
         hr = max(8, int(ih / 1.52))       # 喇叭
+        # 星的笔宽跟放大镜那一档对齐（放大镜 = 0.26×mr ≈ 0.13×ih）：
+        # 三个图标得看着像**同一支笔**画的，不然一眼就看出星是外来的。
+        slw = max(1.5, ih * 0.13)
+        sr = max(7, int((ih - slw) / 1.81))   # ★（描边上下各占半宽，先减掉一整条）
         igap = max(8, int(fp * 0.22))     # 两个**图标**之间的空隙
         tgap = max(8, int(fp * 0.20))     # 音标 ↔ 喇叭：喇叭要贴着音标
 
         # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下。
-        # run（图标组一共占多宽）和下面三个中心点都出自同一个 hover_icons()：
-        # 以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，一旦对不上就是
-        # 框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
-        run = icon_run_width(sr, mr, hr, igap)
-        need = ipad + (phf.measure(acc) if acc else 0) + tgap + run + ipad
+        # 两组的宽度和下面三个中心点都出自同一份算式（icon_group_widths /
+        # hover_icons）：以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，
+        # 一旦对不上就是框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
+        snd_w, right_w = icon_group_widths(sr, mr, hr, igap)
+        mgap = max(10, int(fp * 0.30))    # 喇叭 ↔ 放大镜：两组之间**至少**留这么宽
+        need = (ipad + (phf.measure(acc) if acc else 0) + tgap + snd_w
+                + mgap + right_w + ipad)
         if bx1 - bx0 < need:
             bx1 = bx0 + need
         bx1 = min(bx1, float(self.sw - 2))
         bx0 = max(0.0, min(bx0, bx1 - 40))
         txt_l = bx0 + ipad
-        # 音标最多能画多宽：从内容左端，到"图标组左沿再往左退 tgap"
-        seg = self._fit(phf, acc, bx1 - ipad - run - tgap - txt_l)
-        # 喇叭左沿 = 音标**实际**画完之后的右缘 + tgap。位置由音标自己的宽度决定，
-        # 所以喇叭永远贴着音标走，不管框被撑到多宽。
+        # 音标最多能画多宽：右端得留够「两组图标 + 它们之间的最少空隙」
+        seg = self._fit(phf, acc, bx1 - ipad - right_w - mgap - tgap - snd_w - txt_l)
+        # 喇叭左沿 = 音标**实际**画完之后的右缘 + tgap —— 喇叭跟着音标走；
+        # 放大镜 / 星则从框右内沿反推，钉死不动。
         # 末尾那个 min 是保险：_fit 在极端窄的框里会整段吐回来（它有 max_w<=8 的
-        # 早退），那时硬排会把图标顶出框外，宁可让喇叭压一点音标。
+        # 早退），那时硬排会把喇叭顶到放大镜身上，宁可让它压一点音标。
         snd_ax = txt_l + (phf.measure(seg) if seg else 0) + tgap
-        snd_ax = min(snd_ax, bx1 - ipad - run)
-        ic = hover_icons(snd_ax, sr, mr, hr, igap)
+        snd_ax = min(snd_ax, bx1 - ipad - right_w - mgap - snd_w)
+        ic = hover_icons(snd_ax, bx1 - ipad, sr, mr, hr, igap)
 
         box = self._round_rect(bx0, top, bx1, bot, max(6, int(fp * 0.22)),
                                fill=CLR_HOVER_BG, stipple="gray50",
@@ -2310,19 +2333,23 @@ class DanmakuLayer(object):
         # 不用为"这里是个空当"再补什么。
         it["_dict_box"] = self._icon_box(dids, ic["dict"], cy, ms)
 
-        # —— 收藏星：实心 ——
-        # 空心星笔画之外什么都没有，看着发飘、也容易被误读成"没选中"；实心还能让
-        # 「已收藏/未收藏」只靠颜色就分得开。
-        # 顺带一提：实心也是**点得着**的前提 —— 空心处那些没画上东西的像素会被
-        # 色键抠掉，鼠标在那儿会穿透（同镜片，见上面那段说明）。
+        # —— 收藏星：线稿（跟喇叭 / 放大镜同一支笔）——
+        # 空心、只描边：以前是**实心**星、外接框还比另外两个大一圈，跟信息行里
+        # 另外两个线稿图标不是一套（宇 2026-10-14 指出来）。空心处漏成桌面的像素
+        # 鼠标会穿透、窗口收不到那儿的点击 —— 补它的是 `_click_poll` 的全局左键
+        # 兜底（跟镜片同一个道理，别看到"空心的点不着"就把 fill 填回去）。
+        # 颜色落在描边上：收藏 = 金黄、没收藏 = 浅灰（跟放大镜同色，靠形状区分）。
         fav = bool(it.get("_fav"))
-        # 星悬停时**只放大、不换色** —— 它的颜色已经被"收藏了没有"占着，
-        # 再拿颜色当悬停态就跟收藏态撞车了。
+        # 悬停只放大、不换色 —— 换色就跟收藏态撞车了（未收藏时顺手提个亮；
+        # 收藏时保留金黄，不然一悬停反而看不出收没收藏）。
         ss = sr * (ICON_HOT if hot == "star" else 1.0)
+        stcl = CLR_STAR_ON if fav else (CLR_ICON_HOT if hot == "star"
+                                        else CLR_STAR_OFF)
+        # joinstyle="round"：五角星的尖角用 miter 会甩出长毛刺、还把墨迹撑高一截
+        # （上面 sr 的系数就是按圆角算的），圆角才配得上放大镜那支圆头笔。
         stids = [c.create_polygon(self._star_pts(ic["star"], cy, ss),
-                                  fill=CLR_STAR_ON if fav else CLR_STAR_OFF,
-                                  outline=CLR_STAR_ON_BR if fav else CLR_STAR_OFF_BR,
-                                  width=max(1, int(ss * 0.20)), tags=("hoverui",))]
+                                  fill="", outline=stcl, width=slw,
+                                  joinstyle="round", tags=("hoverui",))]
         it["_star_box"] = self._icon_box(stids, ic["star"], cy, ss)
 
         it["_hitbox"] = (bx0 - 6, top - 6, bx1 + 6, bot + 6)
@@ -2476,6 +2503,10 @@ class DanmakuLayer(object):
         """窗口**真收到了**的那一半点击（悬停靠定时轮询光标，不用 <Motion>）。"""
         if not self.interactive:
             return
+        # 先把"原生真收到这一下"记下来：兜底轮询看到它就知道这一下轮不到自己，
+        # 不会再补点一次（见 _native_recent / _click_poll）。
+        self._native_press_t = time.perf_counter()
+        self._native_press_xy = (e.x, e.y)
         # 窗口既然收到，全局兜底那条路就撤单 —— 同一次物理点击只走一遍。
         self._pending_press = None
         # 极少数情况下兜底会抢在原生前面（Tk 消息队列卡了一下）：它点过的坐标
@@ -2494,6 +2525,20 @@ class DanmakuLayer(object):
             return False
         return abs(p[0] - x) <= 4 and abs(p[1] - y) <= 4
 
+    def _native_recent(self, xy):
+        """原生窗口刚（去重窗口内、同一处）真收到过 <Button-1> 吗。
+
+        兜底**接单之前**必须问这一句：图标是实心像素时，原生那条路先到、这一下
+        早被处理过了，兜底再补一笔就是同一次点击点两遍 —— 收藏就是这么变成
+        "要双击才有效"的（第一下点两次互相抵掉，第二下才净生效。宇 2026-10-14 报的）。
+        """
+        if xy is None or self._native_press_xy is None:
+            return False
+        if time.perf_counter() - self._native_press_t > CLICK_DEDUP_S:
+            return False
+        p = self._native_press_xy
+        return abs(p[0] - xy[0]) <= 4 and abs(p[1] - xy[1]) <= 4
+
     def _start_click_poll(self):
         if self._click_job is None:
             try:
@@ -2510,6 +2555,7 @@ class DanmakuLayer(object):
             self._click_job = None
         self._btn_down = False
         self._pending_press = None
+        self._native_press_xy = None
 
     def _click_poll(self):
         """
@@ -2518,9 +2564,10 @@ class DanmakuLayer(object):
         所以除了原生 <Button-1>，再自己查一眼左键状态：光标压在某块图标框里，
         就走和原生点击同一条路径。
 
-        去重不靠时间窗，靠"撤单"：按下沿到了先只记一笔 `_pending_press`，
-        留一拍给原生（原生收到了会在 _on_canvas_click 里把它清掉）；
-        下一拍它还挂着，说明窗口确实没收到（透明像素），这才出手。
+        去重靠"撤单"：按下沿到了先只记一笔 `_pending_press`，留一拍给原生
+        （原生收到了会在 _on_canvas_click 里把它清掉）；下一拍它还挂着，说明
+        窗口确实没收到（透明像素），这才出手。
+        原生**比这一拍还早**到的那种（实心像素）由 `_native_recent` 挡住、不接单。
         `_btn_down` 保证按住不放只算一次。
         """
         self._click_job = None
@@ -2531,14 +2578,10 @@ class DanmakuLayer(object):
                 return
         except Exception:
             return
-        try:
-            st = int(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON)) & 0xFFFF
-        except Exception:
-            st = 0
+        st = _lbutton_state()
         down = bool(st & 0x8000)
         fresh = down and not self._btn_down      # 按下沿
         self._btn_down = down
-        # 低位是"上次问过之后按下过"：按得比 CLICK_POLL_MS 还快的点击只有它抓得住
         # 低位是"上次问过之后按下过"：按得比 CLICK_POLL_MS 还快的点击只有它抓得住
         kicked = bool(st & 0x0001)
         if self._pending_press is not None and not fresh:
@@ -2553,7 +2596,12 @@ class DanmakuLayer(object):
         elif (fresh or kicked) and self._hover is not None:
             # 先只记一笔，不立刻点：留一拍（40ms）给原生投递。原生接到了会在
             # _on_canvas_click 里把这笔单清掉，下一拍这儿便不再出手。
-            self._pending_press = self._cursor_xy()
+            # ⚠️ 但原生可能**比这一拍还早**（图标是实心像素时就是）：那它早把这一下
+            # 处理完了。先问一句 _native_recent，是的话就别接单 —— 否则同一次点击
+            # 点两遍（收藏"要双击才有效"就是这么来的）。
+            xy = self._cursor_xy()
+            if xy is not None and not self._native_recent(xy):
+                self._pending_press = xy
         try:
             self._click_job = self.win.after(CLICK_POLL_MS, self._click_poll)
         except Exception:
