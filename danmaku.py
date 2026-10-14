@@ -24,9 +24,11 @@ import csv
 import json
 import math
 import os
+import queue
 import random
 import re
 import sys
+import threading
 import time
 import ctypes
 import ctypes.wintypes
@@ -53,12 +55,20 @@ DATA_CSV = os.path.join(BOOKS_DIR, "六级核心过考版（全部·2551词）.c
 # 原来是"六级词汇大全（已学·152词）"，2026-10-13 宇把那本删了，默认改到核心过考版。
 DEFAULT_BOOK_NAME = os.path.basename(DATA_CSV)
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+LOG_PATH = os.path.join(APP_DIR, "error.log")   # 非致命问题也往这儿追加，别让它静默消失
 FONT_DIR = os.path.join(APP_DIR, "fonts")
 
 # 大写锁定：开着的时候弹幕层不再鼠标穿透，可以悬停看音标、点放大镜查词、点星收藏
 VK_CAPITAL = 0x14
+# 全局热键用到的虚拟键码（Ctrl+Alt+H / P / Q）
+VK_H = 0x48
+VK_P = 0x50
+VK_Q = 0x51
 CAPS_POLL_MS = 100        # 轮询大写锁定的周期（毫秒）；要短于一次按键，才能抓到按下沿
 HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
+HOTKEY_POLL_MS = 120      # 主线程取全局热键动作的周期（毫秒）
+TICK_MS = 8               # 有东西在动时的动画周期（毫秒）
+IDLE_TICK_MS = 120        # 屏上没有会动的东西时的周期（毫秒），见 DanmakuApp._tick
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
@@ -75,6 +85,16 @@ BOOST_MAX_SEC = 3.0  # 兜底：这么久还没甩开就恢复正常，谁也不
 
 # 音标固定用微软雅黑（常规字重 —— 花底 + 小字号下粗体笔画会糊成一团）
 PHON_FACE = "Microsoft YaHei"
+
+# ⚠️ 雅黑**真的缺**这几个 IPA 字符（GDI GetGlyphIndicesW + GGI_MARK_NONEXISTING_GLYPHS
+# 实测，全部返回 0xFFFF「无字形」）：ə ɜ ɪ ʊ ˈ ː —— 所以音标今天能正常显示，
+# 靠的是 Windows 的 **font linking** 在逐字兜底，不是"雅黑什么都有"。
+# （早期注释说这是 cmap 解析器误报，反了：_ttf_codepoints 读出来的就是事实，
+#   Lolita / Segoe UI / Arial 都有这些字形，唯独雅黑没有。）
+# 想不依赖 font linking、整行改用一支自带 IPA 的字体：把下面填成 "Segoe UI"。
+# 代价是 _draw_hover 里那两处按雅黑标定过的竖直光学修正（0.62 / 0.41 em）
+# 要重新实拍标定，所以默认留空、维持现观感。
+PHON_FACE_FALLBACK = ""
 
 # 收藏夹词书：悬停时点★收进来的词，全部整理进这一本
 FAV_BOOK_NAME = "已收藏单词.csv"
@@ -178,6 +198,12 @@ DEFAULT_CONFIG = {
 
 POS_RE = re.compile(r"^\s*([a-zA-Z]{1,6}\.)\s*(.+)$")
 
+# 「词性 + 后面的空白」。必须先把 1~n 个空格压成 1 个：百词斩的数据里 acquire 是
+# "v.  （通过努力、能力）获得；…" —— 词性后面跟的是**两个**空格，而双空格正好是
+# 词性块的分隔符，不压掉就会把 "v." 单独切出去、降级成一个义项
+#（弹幕上显示成 "acquire  v.；获得"）。实测：4 本词书里那一份 acquire 全中。
+POS_GAP_RE = re.compile(r"([a-zA-Z]{1,6}\.)\s+")
+
 # 标点归一化表：把「主字体画不出」的标点换成它自带的等价符号。
 #
 # 现状：**空表，不替换任何标点**。
@@ -261,6 +287,43 @@ class _LOGFONTW(ctypes.Structure):
 
 class _SIZE(ctypes.Structure):
     _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+# ctypes 不声明 argtypes/restype 时，参数和返回值都按 c_int 解释 —— 64 位下句柄会被
+# 截成 32 位。GDI 句柄本来就是 32 位的表索引，所以老代码能跑，但那是"碰巧对"。
+# 这里把用到的原型钉死（wintypes 早就 import 了，一直没人用）。
+_HGDIOBJ = ctypes.wintypes.HGDIOBJ
+_GDI.CreateCompatibleDC.argtypes = [ctypes.wintypes.HDC]
+_GDI.CreateCompatibleDC.restype = ctypes.wintypes.HDC
+_GDI.CreateFontIndirectW.argtypes = [ctypes.POINTER(_LOGFONTW)]
+_GDI.CreateFontIndirectW.restype = ctypes.wintypes.HFONT
+_GDI.SelectObject.argtypes = [ctypes.wintypes.HDC, _HGDIOBJ]
+_GDI.SelectObject.restype = _HGDIOBJ
+_GDI.DeleteObject.argtypes = [_HGDIOBJ]
+_GDI.DeleteObject.restype = ctypes.wintypes.BOOL
+_GDI.DeleteDC.argtypes = [ctypes.wintypes.HDC]
+_GDI.DeleteDC.restype = ctypes.wintypes.BOOL
+_GDI.CreateDIBSection.argtypes = [ctypes.wintypes.HDC,
+                                  ctypes.POINTER(_BITMAPINFOHEADER),
+                                  ctypes.wintypes.UINT,
+                                  ctypes.POINTER(ctypes.c_void_p),
+                                  ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
+_GDI.CreateDIBSection.restype = ctypes.wintypes.HBITMAP
+_GDI.GetTextExtentPoint32W.argtypes = [ctypes.wintypes.HDC, ctypes.c_wchar_p,
+                                       ctypes.c_int, ctypes.POINTER(_SIZE)]
+_GDI.GetTextExtentPoint32W.restype = ctypes.wintypes.BOOL
+_GDI.SetBkMode.argtypes = [ctypes.wintypes.HDC, ctypes.c_int]
+_GDI.SetBkMode.restype = ctypes.c_int
+_GDI.SetTextAlign.argtypes = [ctypes.wintypes.HDC, ctypes.wintypes.UINT]
+_GDI.SetTextAlign.restype = ctypes.wintypes.UINT
+_GDI.SetTextColor.argtypes = [ctypes.wintypes.HDC, ctypes.wintypes.DWORD]
+_GDI.SetTextColor.restype = ctypes.wintypes.DWORD
+_GDI.TextOutW.argtypes = [ctypes.wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_wchar_p, ctypes.c_int]
+_GDI.TextOutW.restype = ctypes.wintypes.BOOL
+_GDI.AddFontResourceExW.argtypes = [ctypes.wintypes.LPCWSTR,
+                                    ctypes.wintypes.DWORD, ctypes.c_void_p]
+_GDI.AddFontResourceExW.restype = ctypes.c_int
 
 
 def _gdi_font(px, face, bold=False):
@@ -443,6 +506,66 @@ def end_timer_resolution(ms=1):
         ctypes.windll.winmm.timeEndPeriod(ms)
     except Exception:
         pass
+
+
+def log_event(msg):
+    """
+    把非致命问题追加写进 error.log。
+
+    以前这些地方全是裸的 except Exception: pass：config.json 被写坏、悬停框画不出来，
+    用户那边只表现为「设置莫名其妙回到默认了」，一点线索都不留。写日志本身再失败也不能
+    反过来影响主流程，所以这里自己兜住自己。
+    """
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def read_config(path=None):
+    """
+    读配置：返回 dict（读不到 / 坏了都返回空 dict，由调用方叠在 DEFAULT_CONFIG 上）。
+
+    坏文件**要留痕**：现场就有一份 0 字节的 config.json，老代码 json.load 抛异常被
+    静默吃掉，用户所有设置无声回到出厂值，谁也不知道发生过什么。
+    """
+    path = path or CONFIG_PATH
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log_event("config 读取失败（本次用出厂值）：%r" % (e,))
+        return {}
+    if not isinstance(data, dict):
+        log_event("config 顶层不是对象（%s），已忽略" % type(data).__name__)
+        return {}
+    return data
+
+
+def write_config(cfg, path=None):
+    """
+    原子写配置：先写同目录的 .tmp，再 os.replace 顶上去。
+
+    收藏夹一直是这么干的，配置反而漏了 —— 直接 open(w) 覆盖写，写一半掉电 / 被杀
+    就留下半截（甚至 0 字节）的文件。返回是否成功。
+    """
+    path = path or CONFIG_PATH
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        log_event("config 写入失败：%r" % (e,))
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return False
 
 
 def apply_layered(hwnd, key_hex, click_through=True, alpha=255):
@@ -828,7 +951,9 @@ def parse_mean_cn(mean_cn):
     """
     if not mean_cn:
         return []
-    parts = [p.strip() for p in re.split(r"\s{2,}", str(mean_cn)) if p.strip()]
+    # 先压掉「词性 + 多余空白」，再按双空格分块（见 POS_GAP_RE）
+    text = POS_GAP_RE.sub(r"\1 ", str(mean_cn))
+    parts = [p.strip() for p in re.split(r"\s{2,}", text) if p.strip()]
     senses = []
     for p in parts:
         m = POS_RE.match(p)
@@ -1048,6 +1173,24 @@ def build_text(w, cfg):
     return normalize_punct(txt).strip()
 
 
+def text_cache_key(book_path, word, cfg):
+    """
+    弹幕文案缓存的 key。
+
+    ⚠️ 拿「词在词表里的序号」当 key 是错的：收藏夹（已收藏单词.csv）每次收藏都
+    **按字母序整本重写**，正拿它当词书时收藏一个新词，后面所有序号都会平移 ——
+    同一个序号指向的单词悄悄换了人，于是弹幕文字和挂在它身上的 word
+    （悬停音标 / 点星收藏用的那个）对不上。改成用单词本身 + 词书路径，
+    序号怎么变都无所谓。
+
+    另外 key 必须覆盖 build_text 读的**每一个**参数：以前漏了 per_pos_meanings，
+    只因为它恰好没暴露在面板上才没出事。
+    """
+    return (book_path, (word.get("word") or ""),
+            cfg.get("max_meanings"), cfg.get("max_pos"),
+            cfg.get("per_pos_meanings"), cfg.get("max_cn_len"))
+
+
 # ---------------------------------------------------------------- 弹幕层
 
 class DanmakuLayer(object):
@@ -1110,7 +1253,9 @@ class DanmakuLayer(object):
         self.refresh_layered()
         # 点星星收藏；悬停靠定时查光标位置，不用 <Motion>（见 _hover_poll）
         self.canvas.bind("<Button-1>", self._on_canvas_click)
-        self._hover_job = self.win.after(HOVER_POLL_MS, self._hover_poll)
+        # 悬停轮询只在「可交互」（大写锁定开）时才跑：默认是穿透态，先不启动，
+        # 等 set_interactive(True) 再拉开。以前是无条件每 90ms 醒一次。
+        self._hover_job = None
 
     def refresh_layered(self):
         """
@@ -1139,7 +1284,10 @@ class DanmakuLayer(object):
         if enabled == self.interactive:
             return
         self.interactive = enabled
-        if not enabled:
+        if enabled:
+            self._start_hover_poll()   # 穿透态下没必要轮询光标（见 _hover_poll）
+        else:
+            self._stop_hover_poll()
             self._set_hover(None)      # 退出交互态：解冻并收起信息框
         self.refresh_layered()
 
@@ -1149,7 +1297,11 @@ class DanmakuLayer(object):
         （用户明确要求：暂停后不能清屏，继续时接着走）。
         """
         self.paused = bool(paused)
-        self._last_t = time.monotonic()   # 重置时间基线，继续的那一帧不会瞬移
+        # 重置时间基线，继续的那一帧不会瞬移。
+        # ⚠️ 必须和 tick 用同一个时钟：这里曾经写的是 time.monotonic()，
+        # 而 tick 读的是 time.perf_counter()，两者在 Windows 上基准不同
+        # （本机实测差 35ms）—— 于是每次「继续」的第一帧都会按那 35ms 多走一步。
+        self._last_t = time.perf_counter()
         self._acc = 0.0
 
     # -- 布局 ----------------------------------------------------
@@ -1453,20 +1605,27 @@ class DanmakuLayer(object):
                 pass
             self._hover_job = None
 
+    def _start_hover_poll(self):
+        """启动悬停命中检测（只有「可交互」时才需要它）。"""
+        if self._hover_job is None:
+            try:
+                self._hover_job = self.win.after(HOVER_POLL_MS, self._hover_poll)
+            except Exception:
+                self._hover_job = None
+
     def _hover_poll(self):
         self._hover_job = None
+        if not self.interactive:
+            return          # 已切回穿透：停机，等下次开交互再启动
         try:
             if not self.win.winfo_exists():
                 return
         except Exception:
             return
         try:
-            if self.interactive:
-                it = self._item_at_cursor()
-                if it is not self._hover:
-                    self._set_hover(it)
-            elif self._hover is not None:
-                self._set_hover(None)
+            it = self._item_at_cursor()
+            if it is not self._hover:
+                self._set_hover(it)
         except Exception:
             pass
         try:
@@ -2345,6 +2504,87 @@ class TomatoSlider(tk.Frame):
         self._set_visible(inside)
 
 
+# ---------------------------------------------------------------- 全局热键
+#
+# 为什么需要它：面板收起后 root 是 withdrawn 状态，整个应用没有键盘焦点，
+# Tk 的 bind_all 完全收不到按键 —— 而 README 一直写着「Ctrl+Alt+Q 退出」。
+#
+# RegisterHotKey(NULL, id, ...) 是把热键挂到**调用线程**的消息队列上的，
+# 所以注册和 GetMessageW 必须在同一根线程里，而且必须自己起一根：Tk 的主循环
+# 不会把 WM_HOTKEY 交出来。收到之后只往 queue 里塞一个动作名，由 Tk 主线程
+# 取出来执行 —— Tcl 不是线程安全的，子线程里碰 Tk 会随机炸。
+class GlobalHotkeys(object):
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_NOREPEAT = 0x4000     # 按住不放只触发一次
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+
+    def __init__(self, sink):
+        self.sink = sink          # 回调 sink(动作名)，在子线程里被调用
+        self._thread = None
+        self._tid = None
+        self._ok = set()
+        self._ready = threading.Event()
+
+    def start(self, specs):
+        """
+        specs = [(动作名, 虚拟键码), ...]。
+        返回**注册成功**的动作名集合；调用方据此决定哪些键还要用 bind_all 兜底。
+        """
+        self._ok = set()
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, args=(list(specs),),
+                                        daemon=True)
+        self._thread.start()
+        self._ready.wait(0.5)     # 注册是本地调用，正常几毫秒就回来
+        return set(self._ok)
+
+    def stop(self):
+        """让消息循环退出并注销热键（PostThreadMessage 是给线程队列投消息的唯一办法）。"""
+        tid, self._tid = self._tid, None
+        if tid:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(tid, self.WM_QUIT, 0, 0)
+            except Exception:
+                pass
+        self._thread = None
+
+    def _run(self, specs):
+        u = ctypes.windll.user32
+        u.RegisterHotKey.argtypes = [ctypes.wintypes.HWND, ctypes.c_int,
+                                     ctypes.wintypes.UINT, ctypes.wintypes.UINT]
+        u.RegisterHotKey.restype = ctypes.wintypes.BOOL
+        u.UnregisterHotKey.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+        u.UnregisterHotKey.restype = ctypes.wintypes.BOOL
+        u.GetMessageW.argtypes = [ctypes.POINTER(ctypes.wintypes.MSG),
+                                  ctypes.wintypes.HWND, ctypes.wintypes.UINT,
+                                  ctypes.wintypes.UINT]
+        u.GetMessageW.restype = ctypes.wintypes.BOOL
+        mods = self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT
+        for i, (name, vk) in enumerate(specs, start=1):
+            if u.RegisterHotKey(None, i, mods, vk):
+                self._ok.add(name)
+        self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        self._ready.set()
+        if not self._ok:
+            return                # 一个都没抢到：线程收工，调用方走 bind_all
+        msg = ctypes.wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == self.WM_HOTKEY:
+                for i, (name, _vk) in enumerate(specs, start=1):
+                    if i == msg.wParam and name in self._ok:
+                        try:
+                            self.sink(name)
+                        except Exception:
+                            pass
+        for i in range(1, len(specs) + 1):
+            try:
+                u.UnregisterHotKey(None, i)
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------- 控制面板
 
 class DanmakuApp(object):
@@ -2362,7 +2602,10 @@ class DanmakuApp(object):
         self.layer = None
         self._spawn_job = None
         self._tick_job = None
+        self._tick_ms = TICK_MS   # 当前 tick 的调度周期（空屏/暂停时会降频）
         self._save_job = None
+        self._hotkey_job = None
+        self._hotkeys = None
         self._text_cache = {}      # (词书, 词序号, 影响文案的参数) -> 弹幕文案
         # 收藏夹（books\已收藏单词.csv）的内存镜像
         self._fav_rows = []
@@ -2417,12 +2660,7 @@ class DanmakuApp(object):
 
     def _load_config(self):
         cfg = dict(DEFAULT_CONFIG)
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    cfg.update(json.load(f))
-            except Exception:
-                pass
+        cfg.update(read_config())   # 0 字节 / 写坏 / 没有 → 记一行日志，然后用出厂值继续
         # 迁移：旧的「离屏后随机间隔」两参数合并成单一固定间隔，
         # 否则老配置里的 min/max_interval 会让新的固定节奏读不到值。
         if "spawn_interval" not in cfg:
@@ -2439,11 +2677,7 @@ class DanmakuApp(object):
         return cfg
 
     def _save_config(self):
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        write_config(self.cfg)      # 原子写：先 .tmp 再 os.replace，见 write_config
 
     # -- 面板 --------------------------------------------------
 
@@ -3080,14 +3314,15 @@ class DanmakuApp(object):
 
         build_text 里带正则清洗和多次拼接，同一本书、同一套参数下结果完全固定，
         没必要每隔几秒重算一遍 —— 这点开销正好落在 Tk 主线程上，是「顿一下」的帮凶。
+        key 用 text_cache_key（**不能**用序号，原因写在那里）。
         """
-        key = (self.book_path, idx, self.cfg.get("max_meanings"),
-               self.cfg.get("max_pos"), self.cfg.get("max_cn_len"))
+        w = self.words[idx]
+        key = text_cache_key(self.book_path, w, self.cfg)
         t = self._text_cache.get(key)
         if t is None:
             if len(self._text_cache) > 1500:
                 self._text_cache.clear()
-            t = build_text(self.words[idx], self.cfg)
+            t = build_text(w, self.cfg)
             self._text_cache[key] = t
         return t
 
@@ -3100,6 +3335,7 @@ class DanmakuApp(object):
         # word 一起带过去：悬停信息框要音标，点收藏要把整行写进 已收藏单词.csv
         if layer.spawn(txt, replace_oldest=replace, word=self.words[idx]):
             self.spawned += 1
+            self._wake_tick()      # 空闲降频中也要让新词立刻动起来
             self._refresh_status()
 
     # -- 循环 --------------------------------------------------
@@ -3132,9 +3368,28 @@ class DanmakuApp(object):
                 self.layer.tick()
             # 8ms 调度：配合 timeBeginPeriod(1) 才能真的跑到 ~100Hz，
             # 默认 15.6ms 时钟分辨率下写 16 也会被拖成 31ms。
-            self._tick_job = self.root.after(8, self._tick)
+            # 屏上没有会动的东西时降到 IDLE_TICK_MS：暂停中 / 空屏时完全没必要
+            # 每秒唤醒 125 次（笔记本上就是实打实的耗电）。
+            busy = bool(self.layer and self.layer.items and not self.layer.paused)
+            self._tick_ms = TICK_MS if busy else IDLE_TICK_MS
+            self._tick_job = self.root.after(self._tick_ms, self._tick)
         except tk.TclError:
             pass   # 窗口已销毁，正常结束动画循环
+
+    def _wake_tick(self):
+        """
+        刚放出一条新弹幕：把降频后的 tick 立刻提回 TICK_MS。
+
+        否则空屏降到 120ms 后，新弹幕会在入场点干等最多 120ms 才起步。
+        （那一帧哪怕带上 100ms 的位移也看不见 —— 它还在屏幕右边缘外面。）
+        """
+        if self._tick_job and self._tick_ms != TICK_MS:
+            try:
+                self.root.after_cancel(self._tick_job)
+            except Exception:
+                pass
+            self._tick_ms = TICK_MS
+            self._tick_job = self.root.after(0, self._tick)
 
     # -- 状态 --------------------------------------------------
 
@@ -3233,6 +3488,9 @@ class DanmakuApp(object):
         self.running = True
         if self.layer:
             self.layer.set_paused(False)
+        # 暂停期间 tick 是降频跑的（屏上还有弹幕，但都不动）。这里必须把它提回
+        # TICK_MS，否则「继续」后的第一帧会带着最多 120ms 的 dt 一次性跳过去。
+        self._wake_tick()
         self._schedule_spawn()
 
     def hide_panel(self):
@@ -3250,20 +3508,62 @@ class DanmakuApp(object):
     # -- 热键 --------------------------------------------------
 
     def _bind_hotkeys(self):
-        self.root.bind_all("<Control-Alt-h>", lambda e: (
-            self.show_panel() if self.root.state() == "withdrawn" else self.hide_panel()))
-        self.root.bind_all("<Control-Alt-H>", lambda e: (
-            self.show_panel() if self.root.state() == "withdrawn" else self.hide_panel()))
-        self.root.bind_all("<Control-Alt-p>", lambda e: self.toggle())
-        self.root.bind_all("<Control-Alt-P>", lambda e: self.toggle())
-        self.root.bind_all("<Control-Alt-q>", lambda e: self.quit_app())
-        self.root.bind_all("<Control-Alt-Q>", lambda e: self.quit_app())
+        """
+        热键分两条路，但**同一个键只会生效一路**，不会按一下触发两次：
+
+          · 首选系统级 RegisterHotKey（见 GlobalHotkeys）—— 面板收起（withdraw）
+            之后整个应用没有键盘焦点，Tk 的 bind_all 那套会整个哑掉，而 README
+            一直写着「Ctrl+Alt+Q 退出」；
+          · 注册失败（被别的程序占着）才退回 bind_all：至少面板/把手有焦点时能用。
+        """
+        self._hotkey_q = queue.Queue()
+        self._hotkeys = GlobalHotkeys(self._hotkey_q.put)
+        specs = (("panel", VK_H), ("toggle", VK_P), ("quit", VK_Q))
+        got = self._hotkeys.start(specs)
+        for name, vk in specs:
+            if name in got:
+                continue
+            for ch in (chr(vk).lower(), chr(vk).upper()):
+                self.root.bind_all("<Control-Alt-%s>" % ch,
+                                   lambda e, n=name: self._hot(n))
+        # 动作只在主线程里执行（Tcl 不是线程安全的），所以这里轮询队列
+        self._hotkey_job = self.root.after(HOTKEY_POLL_MS, self._poll_hotkeys)
+
+    def _hot(self, name):
+        """热键动作的统一入口（全局热键与 bind_all 两条路都走它）。"""
+        if name == "panel":
+            if self.root.state() == "withdrawn":
+                self.show_panel()
+            else:
+                self.hide_panel()
+        elif name == "toggle":
+            self.toggle()
+        elif name == "quit":
+            self.quit_app()
+
+    def _poll_hotkeys(self):
+        self._hotkey_job = None
+        try:
+            self._hotkey_job = self.root.after(HOTKEY_POLL_MS, self._poll_hotkeys)
+        except Exception:
+            return                      # 窗口已经没了
+        while True:
+            try:
+                name = self._hotkey_q.get_nowait()
+            except queue.Empty:
+                return
+            self._hot(name)
+            if name == "quit":
+                return
 
     # -- 退出 --------------------------------------------------
 
     def quit_app(self):
         self.running = False
-        for job in (self._spawn_job, self._tick_job, self._save_job, self._caps_job):
+        if self._hotkeys:
+            self._hotkeys.stop()     # 注销系统级热键，别一直占着 Ctrl+Alt+…
+        for job in (self._spawn_job, self._tick_job, self._save_job, self._caps_job,
+                    self._hotkey_job):
             if job:
                 try:
                     self.root.after_cancel(job)
