@@ -259,7 +259,8 @@ class ResolveBookTest(unittest.TestCase):
     def test_prefers_default_book(self):
         self._touch("zzz.csv")
         self._touch(danmaku.DEFAULT_BOOK_NAME)
-        self.assertEqual(danmaku.resolve_book({})[0], os.path.splitext(danmaku.DEFAULT_BOOK_NAME)[0])
+        want = os.path.splitext(danmaku.DEFAULT_BOOK_NAME)[0]
+        self.assertEqual(danmaku.resolve_book({})[0], want)
 
     def test_unknown_name_falls_back(self):
         self._touch("zzz.csv")
@@ -473,8 +474,10 @@ class HoverIconLayoutTest(unittest.TestCase):
 
     def test_icon_gaps_match_the_constants(self):
         ic = self._lay()
-        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.IGAP + self.MR)
+        # 喇叭归音标那一组：音标↔喇叭是 igap（贴紧），喇叭↔放大镜才是 gap（分组）
+        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.GAP + self.MR)
         self.assertAlmostEqual(ic["star"] - ic["dict"], self.MR + self.IGAP + self.SR)
+        self.assertAlmostEqual(ic["sound"] - ic["txt_r"], self.HR + self.IGAP)
 
     def test_star_sits_at_the_right_padding(self):
         ic = self._lay(1000.0)

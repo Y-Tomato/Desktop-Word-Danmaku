@@ -61,6 +61,7 @@ HOVER_POLL_MS = 90        # 悬停命中检测的周期（毫秒）
 HOTKEY_POLL_MS = 120      # 主线程取全局热键动作的周期（毫秒）
 TICK_MS = 8               # 有东西在动时的动画周期（毫秒）
 IDLE_TICK_MS = 120        # 屏上没有会动的东西时的周期（毫秒），见 DanmakuApp._tick
+SOUND_POLL_MS = 150       # 读音还在不在放的检查周期（毫秒），见 DanmakuLayer._lit_sound
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
@@ -153,6 +154,9 @@ CLR_STAR_OFF_BR = "#7A7A7A"
 # 靠形状区分就够了（一个实心星、一个线稿镜片），再换个颜色反而显得没整理。
 CLR_DICT       = "#E9E9E9"
 CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
+# ⚠️ 镜片**必须填实色**：色键抠掉的像素不参与命中，镂空的圆心鼠标点不中
+#（逐像素实测过，见 README 坑 3）。所以要"像玻璃"只能换颜色，不能留空。
+CLR_LENS       = "#9FD8F5"  # 镜面：浅蓝，让它在深灰信息框上看着像块真镜片
 # 喇叭（读音）图标：和放大镜同档浅灰，三个图标同级、靠形状区分
 CLR_SOUND      = "#E9E9E9"
 CLR_SOUND_HL   = "#FFC53D"  # 出声也有起播延迟（MCI open + 解码），同样先亮一下
@@ -1237,6 +1241,15 @@ class WordAudio(object):
         self.path = path
         return self._cmd("play %s" % self.ALIAS) == 0
 
+    def is_playing(self):
+        """MCI 这一段还没放完？（喇叭要在整段读音期间一直亮着，靠它判断何时收灯）"""
+        if self._mci is None or not self.path:
+            return False
+        buf = ctypes.create_unicode_buffer(32)
+        if self._mci("status %s mode" % self.ALIAS, buf, 32, None):
+            return False
+        return buf.value.strip().lower() == "playing"
+
     def close(self):
         if self.path:
             self._cmd("close %s" % self.ALIAS)
@@ -1289,16 +1302,19 @@ def hover_icons(bx1, ipad, gap, sr, mr, hr, igap):
     一遍的算式，一旦对不上就是"框变宽了但图标还按老位置画"——图标被画到框外，
     不报错、只是看着别扭，靠肉眼很难发现。现在两边都从这一份坐标推出来。
 
-    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向）、音标可用的右界 txt_r、以及 `back`
+    喇叭和音标是一组（都跟发音有关）、放大镜和星是另一组，所以音标 ↔ 喇叭用
+    igap 贴紧、喇叭 ↔ 放大镜才用 gap 拉开 —— 一眼看得出是「音标 🔊 | 🔍 ★」。
+    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向）、音标可用的右界
+    txt_r、以及 `back`
     ——「从框右沿退回音标右界」的宽度，调用方用它算框至少要撑多宽。
     """
     star_cx = bx1 - ipad - sr
     dict_cx = star_cx - sr - igap - mr
-    snd_cx = dict_cx - mr - igap - hr
+    snd_cx = dict_cx - mr - gap - hr
     return {
         "sound": snd_cx, "dict": dict_cx, "star": star_cx,
-        "txt_r": snd_cx - hr - gap,
-        "back": ipad + sr * 2 + igap + mr * 2 + igap + hr * 2 + gap,
+        "txt_r": snd_cx - hr - igap,
+        "back": ipad + sr * 2 + igap + mr * 2 + gap + hr * 2 + igap,
     }
 
 
@@ -1309,7 +1325,7 @@ def speaker_pts(cx, cy, r):
     这里**不画线稿** —— 这个字号下喇叭身只有几个像素宽，空心画出来是一团乱麻，
     跟旁边同样是线稿的放大镜也分不开（那才真是"糊成一坨"）。
     """
-    x0 = cx - r * 0.95          # 箱体左沿
+    x0 = cx - r * 0.84          # 箱体左沿（箱体比锥体窄一档才像喇叭，别拉宽）
     x1 = cx - r * 0.30          # 箱体右沿
     x2 = cx + r * 0.12          # 喇叭口
     return [x0, cy - r * 0.30, x1, cy - r * 0.30, x2, cy - r * 0.72,
@@ -1346,6 +1362,8 @@ class DanmakuLayer(object):
         self.fav_state = None     # (word) -> bool，由 App 注入
         self.fav_toggle = None    # (word_dict) -> bool，切换收藏并返回新状态
         self._audio = WordAudio() # 点喇叭读音（MCI 句柄跟着窗口一起释放，见 destroy）
+        self._sound_job = None   # "读音还在不在放"的轮询（放完要收灯）
+        self._sound_it = None    # 当前亮着喇叭的那一条（换词了要先把旧的灭掉）
         self._hover = None        # 当前被悬停、已冻结的那一条
         self._hover_job = None
         self._seq = 0
@@ -2201,13 +2219,13 @@ class DanmakuLayer(object):
         ccx, ccy = ic["dict"] - mr * 0.219, cy - mr * 0.219
         lw = max(1.5, mr * 0.26)
         dcl = CLR_DICT_HL if it.get("_dict_hl") else CLR_DICT
-        # ⚠️ 镜片里**必须填上底色**，不能留空当。灰棋盘是这个框的填充方式，
+        # ⚠️ 镜片里**必须填上实色**，不能留空当。灰棋盘是这个框的填充方式，
         # 漏空的像素会被色键抠掉 —— 而抠掉的像素鼠标会**穿透**，点击根本到不了
         # 我们手上。实测（`_debug\_holecheck.py` 逐像素扫镜片内部）：颜色是 #262626
         # 的点全都能点中，漏成桌面的点全部没反应，一一对应。留空 = "点圆心有一半
         # 概率没反应"，正是宇反馈的那个现象。
         dids = [c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
-                              fill=CLR_HOVER_BG, outline=dcl, width=lw,
+                              fill=CLR_LENS, outline=dcl, width=lw,
                               tags=("hoverui",)),
                 c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
                               ccx + cr * 0.707 + mr * 0.62,
@@ -2297,6 +2315,51 @@ class DanmakuLayer(object):
         if self._hover is it:
             self._redraw_hover(it)
 
+    def _lit_sound(self, it):
+        """
+        读音**播放期间**让喇叭一直亮着。
+
+        只闪 220ms 是不够的：MCI 起播有半拍延迟，音频本身还有一两秒，
+        闪完灯灭了声音还在，看着就像"点了没反应"。所以改成盯着 MCI 的状态，
+        播完自己收灯。
+        """
+        if self._sound_it is not None and self._sound_it is not it:
+            self._unflash(self._sound_it, "_sound_hl")   # 换个词了，先把旧的灭掉
+        self._cancel_sound_poll()   # ⚠️ 只能用"只掐定时器"的那个：_stop_sound_poll
+        self._sound_it = it          #    会把 _sound_it 也清掉，然后轮询第一次
+        it["_sound_hl"] = True       #    进来就 return，灯再也灭不了
+        self._redraw_hover(it)
+        self._sound_poll()
+
+    def _sound_poll(self):
+        self._sound_job = None
+        it = self._sound_it
+        if it is None:
+            return
+        try:
+            playing = self._audio.is_playing() and self.win.winfo_exists()
+        except Exception:
+            playing = False
+        if playing:
+            self._sound_job = self.win.after(SOUND_POLL_MS, self._sound_poll)
+            return
+        self._sound_it = None
+        self._unflash(it, "_sound_hl")
+
+    def _cancel_sound_poll(self):
+        """只掐掉定时器，**不动** _sound_it（换一条弹幕接管亮灯时要先掐旧的）。"""
+        if self._sound_job:
+            try:
+                self.win.after_cancel(self._sound_job)
+            except Exception:
+                pass
+            self._sound_job = None
+
+    def _stop_sound_poll(self):
+        """彻底收灯：清屏 / 关窗口时用，别把 after 回调留给已经死了的窗口。"""
+        self._cancel_sound_poll()
+        self._sound_it = None
+
     @staticmethod
     def _in_box(box, x, y):
         return bool(box) and box[0] <= x <= box[2] and box[1] <= y <= box[3]
@@ -2314,7 +2377,7 @@ class DanmakuLayer(object):
         # 三个判定框互不重叠（图标之间留了 igap≥8，各自外扩 3px 也不会碰上）
         if self._in_box(it.get("_sound_box"), e.x, e.y):
             if self._play_word(it):
-                self._flash(it, "_sound_hl")
+                self._lit_sound(it)
             return
         if self._in_box(it.get("_dict_box"), e.x, e.y):
             if self._open_dict(it):
@@ -2334,6 +2397,7 @@ class DanmakuLayer(object):
         self._redraw_hover(it)      # 立刻把星的颜色换掉，给出即时反馈
 
     def clear(self):
+        self._stop_sound_poll()
         self._set_hover(None)
         for it in list(self.items):
             self._end_boost(it)        # 清屏也要先把它扣着的让路状态收掉
@@ -2341,6 +2405,7 @@ class DanmakuLayer(object):
         self.items = []
 
     def destroy(self):
+        self._stop_sound_poll()    # 先收灯轮询，别把 after 回调留给马上要死的窗口
         self._stop_hover_poll()
         self._audio.close()        # 正在放音时关窗：不 close 会留一个 MCI 句柄
         try:
