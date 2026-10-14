@@ -4,20 +4,12 @@
 ========================
 在电脑屏幕上方 15% 的范围内飘过「英语单词 + 词性 + 中文释义」弹幕。
 
-零第三方依赖：仅用 Python 标准库 tkinter + ctypes。
-词库放在 books\\ 目录（一本词书一个 .csv），允许放多本并在面板里切换。
+零第三方依赖：只用标准库 tkinter + ctypes。词库放 books\\ 目录（一本一个 .csv，
+面板里可切换）。完整说明见 README.md。
 
-用法
-----
-    双击  启动单词弹幕.bat
-    或者  pythonw.exe danmaku.py
-    开机自启时加上 --run：pythonw.exe danmaku.py --run（直接开跑并收起面板）
-
-热键
-----
-    Ctrl+Alt+H   显示 / 隐藏控制面板
-    Ctrl+Alt+P   暂停 / 继续
-    Ctrl+Alt+Q   退出
+用法：双击 启动单词弹幕.bat，或 pythonw.exe danmaku.py
+（开机自启加 --run：直接开跑并收起面板）。
+热键：Ctrl+Alt+H 面板 / P 暂停 / Q 退出。
 """
 
 import csv
@@ -86,14 +78,11 @@ BOOST_MAX_SEC = 3.0  # 兜底：这么久还没甩开就恢复正常，谁也不
 # 音标固定用微软雅黑（常规字重 —— 花底 + 小字号下粗体笔画会糊成一团）
 PHON_FACE = "Microsoft YaHei"
 
-# ⚠️ 雅黑**真的缺**这几个 IPA 字符（GDI GetGlyphIndicesW + GGI_MARK_NONEXISTING_GLYPHS
-# 实测，全部返回 0xFFFF「无字形」）：ə ɜ ɪ ʊ ˈ ː —— 所以音标今天能正常显示，
-# 靠的是 Windows 的 **font linking** 在逐字兜底，不是"雅黑什么都有"。
-# （早期注释说这是 cmap 解析器误报，反了：_ttf_codepoints 读出来的就是事实，
-#   Lolita / Segoe UI / Arial 都有这些字形，唯独雅黑没有。）
-# 想不依赖 font linking、整行改用一支自带 IPA 的字体：把下面填成 "Segoe UI"。
-# 代价是 _draw_hover 里那两处按雅黑标定过的竖直光学修正（0.62 / 0.41 em）
-# 要重新实拍标定，所以默认留空、维持现观感。
+# ⚠️ 雅黑**真的缺** ə ɜ ɪ ʊ ˈ ː（GDI GetGlyphIndicesW 实测全是「无字形」，
+# Lolita / Segoe UI / Arial 都有）。音标今天能显示靠的是 Windows 的 **font linking**
+# 在逐字兜底 —— 早期注释说这是 cmap 解析器误报，反了：_ttf_codepoints 读的是事实。
+# 想不依赖它、整行换一支自带 IPA 的字体就填 "Segoe UI"；代价是 _draw_hover 里那两处
+# 按雅黑标定的竖直光学修正（0.62 / 0.41 em）要重新实拍标定，所以默认留空。
 PHON_FACE_FALLBACK = ""
 
 # 收藏夹词书：悬停时点★收进来的词，全部整理进这一本
@@ -189,9 +178,8 @@ DEFAULT_CONFIG = {
     "font_face": "Microsoft YaHei",   # 缺字回退 / 无自定义字体时的字体
     # —— 词书 ——
     "book": "六级核心过考版（全部·2551词）.csv",   # books\ 下的文件名；空串 = 默认那本
-    # —— 右下角把手位置 ——
-    # 其余出厂值都取自实际调好的一份配置；唯独这里保持 -1：把手坐标是**屏幕
-    # 绝对像素**，写死成某一台机器的值，换个分辨率/外接屏就跑到屏幕外找不着了。
+    # 右下角把手位置：其余出厂值都取自实际调好的一份配置，唯独这里留 -1 ——
+    # 把手坐标是屏幕绝对像素，写死某台机器的值，换个分辨率就跑到屏幕外了。
     "handle_x": -1,
     "handle_y": -1,
 }
@@ -323,9 +311,8 @@ def _gdi_font(px, face, bold=False):
     """
     px = **设备像素**字高，直接用。
 
-    ⚠️ 别按 GetDeviceCaps(LOGPIXELSY) 换算：画进去的是 CreateCompatibleDC +
-    DIBSection（MM_TEXT 1:1 映射），逻辑单位就是设备像素；拿屏幕 DC 的 DPI
-    （本机 192）去换算会把字高缩掉一半，整条弹幕变成半大。
+    ⚠️ 别按 GetDeviceCaps(LOGPIXELSY) 换算：这里是 CreateCompatibleDC + DIBSection
+    （MM_TEXT 1:1），逻辑单位就是设备像素；拿屏幕 DPI（本机 192）换算会把字高缩掉一半。
     """
     lf = _LOGFONTW()
     lf.lfHeight = -int(round(px))
@@ -351,16 +338,13 @@ def _bgra_to_png(w, h, bgra, key_rgb):
     """
     32bpp BGRA → 真彩色 PNG + **tRNS**（把这个色键色声明成完全透明）。
 
-    ⚠️ 这里原本输出的是 PPM —— 快一档，但 PPM **没有"透明色"这个概念**：
-    位图整体不透明，被悬停那条又会被提到灰棋盘框**上面**，于是整块框被位图盖住；
-    Windows 再按窗口色键把位图里的底色像素抠掉 —— 抠出来的是**桌面**，不是框。
-    结果就是"文字笔画之间全是白底"（宇 2026-10-13 反馈「文字后的白色背景不要」，
-    白/浅色桌面越亮越明显）。
-    PNG 的 tRNS 让 **Tk 自己在 canvas 合成时**就把这些像素当 alpha=0 处理，
-    文字周围透出的就是下面那块框，底色不再参与窗口级抠除。
-    代价只有一次 zlib（level=1，实测每条约 1~3 ms，可忽略）。
+    ⚠️ 这里原本输出 PPM（快一档），但 PPM 没有"透明色"这个概念：位图整体不透明，
+    被悬停那条又提在灰棋盘框**上面**，整块框就被位图盖住；Windows 再把位图里的底色
+    抠掉 —— 抠出来的是**桌面**而不是框，就是"文字笔画之间全是白底"（白桌面越亮越明显）。
+    tRNS 让 **Tk 在 canvas 合成时**就把这些像素当 alpha=0，透出的就是下面那块框。
+    代价只有一次 zlib（level=1，每条约 1~3 ms，可忽略）。
 
-    顺带：RGB 用带步长切片搬运（同原 PPM 路径），比逐像素循环快两个数量级。
+    RGB 用带步长切片搬运（同原 PPM 路径），比逐像素循环快两个数量级。
     """
     stride = w * 4
     row_bytes = w * 3
@@ -408,14 +392,11 @@ def stroke_offsets(font_px):
 def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
                        ascent, linespace):
     """
-    把整条弹幕（所有段 + 8 向描边）画成一张位图，背景填色键色；
-    输出 PNG 时用 tRNS 把这个色声明成透明 —— 于是它压在悬停框上时
-    **透出的是框**，而不是被窗口色键抠成洞、露出桌面（见 `_bgra_to_png`）。
+    把整条弹幕（所有段 + 8 向描边）画成一张位图，底色填色键色（透明的原理见 _bgra_to_png）。
 
-    返回 (w, h, png, off_x, off_y)：位图贴到 (cx - off_x, ys - off_y) 时，
-    文字的落点与"逐段 text + anchor=nw"**逐像素重合**（用 TA_BASELINE 对齐基线，
-    位图高度取 linespace，所以 canvas bbox 两者一致 —— 悬停信息框那些按 bbox
-    排版的代码一行都不用改）。
+    返回 (w, h, png, off_x, off_y)：位图贴到 (cx - off_x, ys - off_y) 时，文字落点与
+    "逐段 text + anchor=nw" 逐像素重合（TA_BASELINE 对齐基线、高度取 linespace，
+    canvas bbox 两者一致），悬停信息框那些按 bbox 排版的代码一行都不用改。
     """
     global _GDI_OK
     if not _GDI_OK:
@@ -531,10 +512,8 @@ def log_event(msg):
 
 def read_config(path=None):
     """
-    读配置：返回 dict（读不到 / 坏了都返回空 dict，由调用方叠在 DEFAULT_CONFIG 上）。
-
-    坏文件**要留痕**：现场就有一份 0 字节的 config.json，老代码 json.load 抛异常被
-    静默吃掉，用户所有设置无声回到出厂值，谁也不知道发生过什么。
+    读配置：返回 dict（读不到 / 坏了都给空 dict，调用方再叠在 DEFAULT_CONFIG 上）。
+    坏文件不静默：记一行日志再回出厂值（为什么会有坏文件见 write_config）。
     """
     path = path or CONFIG_PATH
     if not os.path.exists(path):
@@ -553,10 +532,9 @@ def read_config(path=None):
 
 def write_config(cfg, path=None):
     """
-    原子写配置：先写同目录的 .tmp，再 os.replace 顶上去。
-
-    收藏夹一直是这么干的，配置反而漏了 —— 直接 open(w) 覆盖写，写一半掉电 / 被杀
-    就留下半截（甚至 0 字节）的文件。返回是否成功。
+    原子写配置：先写 .tmp 再 os.replace 顶上去。收藏夹一直这么干、配置反而漏了 ——
+    直接 open(w) 写到一半被杀就留下半截（现场那份 0 字节的 config.json 就是这么来的）。
+    返回是否成功。
     """
     path = path or CONFIG_PATH
     tmp = path + ".tmp"
@@ -643,11 +621,10 @@ def _read_ttf_tables(path, index=0):
 
 def _ttf_family_name(path):
     """
-    读 name 表 id=1 拿到字体 family 名（换字体文件时不用改代码）。
+    读 name 表 id=1 拿到字体 family 名（换字体文件不用改代码）。
 
-    坑：name 表里 pid=1（Macintosh）的记录常常排在 pid=3（Windows）前面，
-    而它是**单字节**编码——按 UTF-16 解码会把 "Lolita" 读成 "䱯汩瑡"。
-    所以必须按 platformID 选解码方式，并且优先用 Windows/Unicode 的那条。
+    坑：pid=1（Macintosh）的单字节记录常排在 pid=3（Windows）前面，按 UTF-16
+    解码会把 "Lolita" 读成 "䱯汩瑡" —— 必须按 platformID 选解码方式，且优先 Windows。
     """
     try:
         nd = _read_ttf_tables(path)["name"][2]
@@ -739,12 +716,9 @@ def _ttf_codepoints(path):
 
 class FontSet(object):
     """
-    字体管理：
-      · 注册 fonts/ 下的自带字体（默认萝莉体），并算出它覆盖哪些字；
-      · 按「字体族名」从注册表反查任意系统字体文件，同样算覆盖范围。
-
-    覆盖范围用来做**逐字符缺字回退**：一支字体画不出的字（萝莉体缺全角标点、
-    装饰字体缺简体字）自动改用回退字体单独画，避免整条弹幕变豆腐块。
+    字体管理：注册 fonts/ 下的自带字体（默认萝莉体），按族名从注册表反查系统字体，
+    并算出各自覆盖哪些码位 —— 覆盖范围用来做逐字符缺字回退：主字体画不出的字
+    （装饰字体缺简体字之类）自动换回退字体单独画，否则整条弹幕会变豆腐块。
     """
 
     def __init__(self):
@@ -839,12 +813,11 @@ def _strip_font_suffix(name):
 
 def font_file_for_family(family):
     """
-    按字体族名从注册表反查字体文件路径（含用户自装字体）。
+    按字体族名从注册表反查字体文件路径（含用户自装的）。
 
-    注册表两项：HKLM 是系统字体，HKCU 是「为当前用户安装」的字体——
-    用户自己装的那些装饰字体就只在 HKCU 里，漏了会找不到。
-    值名形如 "Microsoft YaHei & Microsoft YaHei UI (TrueType)"，
-    所以要剥掉后缀、按 & / , 拆开逐个比对族名。
+    HKLM 是系统字体、HKCU 是「为当前用户安装」的（自装装饰字体只在 HKCU 里，
+    漏了就找不到）；值名形如 "Microsoft YaHei & Microsoft YaHei UI (TrueType)"，
+    所以要先剥后缀、再按 & / , 拆开逐个比对族名。
     """
     if winreg is None or not family:
         return None
@@ -1071,8 +1044,8 @@ def fav_row(w):
 
 def write_fav_rows(rows):
     """
-    整本重写收藏夹：UTF-8 BOM + CRLF + 按字母序 —— 与其它词书保持同一种手感
-    （Excel 双击不乱码、行序稳定、便于肉眼 diff）。
+    整本重写收藏夹：UTF-8 BOM + CRLF + 按字母序，与其它词书同一种手感
+    （Excel 双击不乱码、行序稳定、便于 diff）。
     """
     try:
         ensure_fav_book()
@@ -1185,11 +1158,9 @@ def text_cache_key(book_path, word, cfg):
 
 class DanmakuLayer(object):
     """
-    透明、鼠标穿透的弹幕画布。
-
-    性能要点：窗口**只有弹幕带那么高**，不是整屏。
-    整屏 layered 窗口每帧都要重新合成 3120×2080 像素，掉帧就是这么来的；
-    缩到一条带后合成量降一个数量级，配合 1ms 时钟分辨率能稳定跑满帧。
+    透明、鼠标穿透的弹幕画布。窗口**只有弹幕带那么高**，不是整屏：整屏 layered
+    窗口每帧要重新合成 3120×2080 像素，掉帧就是这么来的；缩成一条带后合成量降一个
+    数量级，配合 1ms 时钟分辨率才能稳定跑满帧。
     """
 
     def __init__(self, master, cfg, sw, sh, fonts):
@@ -1200,8 +1171,7 @@ class DanmakuLayer(object):
         self.win = tk.Toplevel(master)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        # 注意：这里**故意不用** -transparentcolor，它在 Windows 上不生效（实测会糊成黑块），
-        # 统一改用下面的 apply_layered() 手动上色键。
+        # 色键/穿透统一走 apply_layered()（不用 -transparentcolor，原因见那里的说明）
         self.win.config(bg=TRANSPARENT_KEY)
         self.canvas = tk.Canvas(self.win, width=sw, height=100,
                                 bg=TRANSPARENT_KEY, highlightthickness=0, bd=0)
@@ -1354,20 +1324,14 @@ class DanmakuLayer(object):
 
     def _pick_y(self, font_px):
         """
-        在弹幕带里挑一个纵向位置，返回 (轨道号, y)。
-        一次一条时带内连续随机（更自然）；多条同屏时按轨道分配。
+        在弹幕带里挑一个纵向位置，返回 (轨道号, y)；一次一条时带内随机，多条同屏按轨道分。
 
-        判定标准不是「这行现在有没有词」，而是「这条放进去会不会撞上」：
-        所有弹幕**同速左移**，入场瞬间不重叠就永远不重叠，所以只要已有那条
-        的右边缘离入场点还有一个身位，这行就能再排一条 —— 不必等它整条走完
-        （这也是为什么不用传入新弹幕的宽度：它一定在最右侧入场）。
-
-        唯一的例外是**被悬停冻住的那条**：它不动，新弹幕迟早追上去叠在一起。
-        所以冻结期间整行视为占用 —— 这正是要的「悬停时才允许重叠」：
-        重叠只发生在悬停期间，而且悬停结束后它能干干净净地走掉，不会被新来的
-        一条接一条地续上、永远等不到空隙。
-
-        全部轨道都排不进去才返回 (None, None)。
+        判定标准是「这条放进去会不会撞上」，不是「这行有没有词」：弹幕**同速左移**，
+        入场不重叠就永远不重叠，所以只要前一条的右边缘离入场点还有一个身位，这行就能
+        再排一条（新弹幕一定在最右侧入场，因此不用把它的宽度传进来）。
+        唯一例外是**被悬停冻住的那条**：它不动、迟早被追上，所以冻结期间整行视为占用
+        —— 重叠只发生在悬停期间，悬停一结束它就能干净走掉，不会被新词一条条续上。
+        排不进任何轨道才返回 (None, None)。
         """
         band = self.band_h
         line_h = font_px * 1.25
@@ -1480,9 +1444,8 @@ class DanmakuLayer(object):
         tag = "dm%d" % self._seq
         x = float(self.sw + 10)
         ys = int(y)
-        # 首选路径：整条弹幕（8 向描边 + 正文）预渲染成**一张位图**。
-        # 这样一条弹幕在 canvas 上只占 1 个 image item —— 每帧的重绘成本从
-        # "9 × 段数 次文本光栅化"降到"1 次位图 blit"，帧率与同屏条数脱钩。
+        # 首选路径：整条弹幕预渲染成一张位图，canvas 上只占 1 个 image item ——
+        # 每帧的重绘从"9 × 段数 次文本光栅化"降到"1 次位图 blit"，帧率与条数脱钩。
         img = None
         met = f_main.metrics()
         bmp = render_text_bitmap(runs, font_px, fam, fall, _hex_rgb(color),
@@ -1674,10 +1637,8 @@ class DanmakuLayer(object):
 
     def _freeze(self, it):
         """
-        把这条从「运动组」里摘出去。
-
-        tick 里用一句 canvas.move("dm") 移动全体，省掉逐条 Tcl 往返；
-        要冻结某一条就只能改它的标签，不能为它把整条快路径废掉。
+        把这条从「运动组」里摘出去：tick 用一句 canvas.move("dm") 移动全体，单冻一条
+        只能改它的标签，不能为它废掉整条快路径（三个运动组的分工见 _release）。
         """
         if it.get("frozen"):
             # 已经在停着了：只再确认一遍它没留在任何**运动组**里
@@ -1697,9 +1658,8 @@ class DanmakuLayer(object):
 
     def _raise_hover(self):
         """
-        把「悬停信息框 + 被悬停的那一条」顶到最上层。
-        新弹幕是后画的，天然压在老弹幕上面；悬停期间同轨道允许后来者穿过，
-        所以每放一条都要把焦点这一组重新提上来，否则它会被路过的弹幕盖住。
+        把「悬停信息框 + 被悬停的那一条」顶到最上层：新弹幕是后画的、天然压在上面，
+        而悬停期间同轨道允许后来者穿过，所以每放一条都得把焦点这组重新提一次。
         """
         if self._hover is None:
             return
@@ -1769,13 +1729,10 @@ class DanmakuLayer(object):
 
     def _unfreeze(self, it):
         """
-        悬停结束，恢复移动 —— 但现在不用它等别人了。
-
-        旧版是"我停着等挡路的飘过去"，宇看完说反了：**应该是它自己先走**。
-        现在改成：
-          · 压着它的那些人都在**右边**（后方追上来的）→ 它**加速往左**拉开距离，
-            那些人原地停一步给它让路，等它甩开了再动；
-          · 万一有人压在**左边**，往左走反而会追得更深 —— 这时才退回排队等待。
+        悬停结束，恢复移动（让路规则与由来见上面 BOOST_MULT 那一段）：
+          · 压着它的人都在**右边**（后方追上来的）→ 它加速往左拉开距离，
+            那些人原地停一步给它让路；
+          · 万一有人压在**左边**，往左只会追得更深 —— 这时退回排队等待。
         """
         if not it.get("frozen"):
             return
@@ -1920,13 +1877,10 @@ class DanmakuLayer(object):
         """
         悬停信息框：圆角灰底 + 下方一行「音标 … ★」。
 
-        半透明为什么用 stipple 而不是 alpha？
-        layered 窗口只有一个**全局** alpha，做不到"只有这块半透明"；
-        而 stipple 是把填充按棋盘格漏空，漏空的像素露出画布底色 ——
-        那正是色键色，会被整块抠掉。于是一半像素直接透出桌面，
-        视觉上就是半透明的，而且是真·逐像素（不是靠猜灰阶）。
-        密度定死 gray50（实测正好漏一半，`_debug\\_stippleprobe.py`）；
-        试过 gray75 被宇否掉，别再动它。
+        半透明走 stipple 而不是 alpha：layered 窗口只有一个全局 alpha，做不到
+        "只有这块半透明"；stipple 漏空的像素露出的正是色键色、会被整块抠掉，
+        于是那半边直接透出桌面（真·逐像素，不是猜灰阶）。
+        密度不许动，原因写在 CLR_HOVER_BG 那一段。
         """
         c = self.canvas
         bb = c.bbox(it["tag"])
@@ -2171,17 +2125,13 @@ def _shade(hex_color, k):
 
 class TomatoSlider(tk.Frame):
     """
-    自绘滑块：浅色轨道 + 红色已选段 + **扁圆的小番茄把手**。
+    自绘滑块：浅色轨道 + 红色已选段 + **扁圆的小番茄把手**，随容器宽度自动重画。
 
-    为什么不用 tk.Scale / ttk.Scale？
-      · tk.Scale 的把手是系统绘制的灰方块，换不了样子；
-      · ttk 的 slider 元素只能塞一张图片，没法随尺寸/主题走；
-      · 更关键的是 emoji 字形：Tk 8.6 不渲染彩色 emoji（COLR/CBDT 表），
-        写 "🍅" 只会得到一颗单色轮廓，所以这里用画布图元画一颗真·彩番茄。
-    控件随容器宽度自动重画（面板现在可以自由拖拽缩放）。
+    不用 tk.Scale / ttk.Scale：前者的把手是系统画的灰方块、换不了样子，后者的
+    slider 只能塞一张图；更关键是 Tk 8.6 不渲染彩色 emoji（没有 COLR/CBDT 支持，
+    写 "🍅" 只有单色轮廓），所以用画布图元自己画一颗番茄最像。
 
-    把手默认是**藏起来**的：只有鼠标悬停或按下拖动时才浮现 / 消失，
-    两头都带轻微的缩放动画；按下瞬间再额外缩小 + 变暗，抬手弹回。
+    把手默认藏起来：悬停或按住拖动才浮现，两头都带轻微缩放动画，按下再缩小变暗。
     """
 
     THUMB = 15          # 番茄半径（100% 缩放时）
@@ -2313,12 +2263,8 @@ class TomatoSlider(tk.Frame):
 
     def _draw_tomato(self, x, y, s=1.0, k=1.0):
         """
-        画一颗**扁**小番茄：果体 + 底部暗弧 + 高光 + 三片叶 + 蒂。
-
-        为什么画扁的？真番茄和 🍅 emoji 本来就是宽略大于高的扁圆，
-        之前画成正圆反而像个红皮球。emoji 走不通：Tk 8.6 不渲染彩色 emoji
-        （GDI 没有 COLR 支持，"🍅" 只有单色轮廓，实测 Segoe UI Emoji /
-        Segoe UI Symbol 都一样），logo 位图又是女孩头像，所以还是画布图元最像。
+        画一颗**扁**小番茄：果体 + 底部暗弧 + 高光 + 三片叶 + 蒂。真番茄本来就是
+        宽略大于高的扁圆，画成正圆反而像红皮球（emoji 走不通的原因见类文档）。
 
         s = 缩放倍率（浮现动画用），k = 明度系数（按压变暗用）。
         """
@@ -2584,8 +2530,6 @@ class DanmakuApp(object):
 
     def __init__(self, autostart=False):
         self.cfg = self._load_config()
-        # 演示/自检模式用的临时参数绝不能落盘：否则「同屏 8 条」这类压测设置
-        # 会被写进 config.json，下次正常启动就变味了。
         ensure_books_dir()
         self.book_name, self.book_path = resolve_book(self.cfg)
         self.words = load_words(self.book_path) if self.book_path else []
@@ -3030,10 +2974,8 @@ class DanmakuApp(object):
 
     def restore_defaults(self):
         """
-        把所有调节项一次性恢复成出厂值。
-
-        只有把手位置（handle_x / handle_y）不动 —— 那是窗口摆哪儿，属于位置不属设置，
-        把人辛辛苦苦拖到顺手的位置重置掉才是真添乱。
+        把所有调节项一次性恢复成出厂值；只有把手位置（handle_x / handle_y）不动 ——
+        那是窗口摆哪儿、属于位置不属设置，重置掉才是添乱。
         """
         if not messagebox.askyesno(
                 APP_TITLE,
@@ -3213,16 +3155,13 @@ class DanmakuApp(object):
         """
         轮询大写锁定：开着 = 弹幕不再鼠标穿透，可悬停看音标 / 点星收藏。
 
-        ⚠️ 别用 `GetAsyncKeyState(VK_CAPITAL) & 1` 判切换态。实测（_debug\\_capstrack.py）：
-        那个低位是**"自上次查询之后按下过"的易失位** —— 按下后立刻读到 1，
-        0.5s 后再读就变 0（被自己上一次查询吃掉了）。拿它当开关的后果就是
-        "按一下亮一瞬"，用起来像"必须按住大写锁定才能交互"。
+        ⚠️ 别用 GetAsyncKeyState(VK_CAPITAL) & 1 判切换态：那个低位是"自上次查询后
+        按下过"的**易失位**（实测按下读到 1、半秒后再读就变 0，被自己上一次查询吃掉），
+        拿它当开关就成了"按一下亮一瞬"。真值是 GetKeyState(VK_CAPITAL) & 1 ——
+        它是全局切换态，后台无焦点进程也跟得上。
 
-        真值是 `GetKeyState(VK_CAPITAL) & 1`；同一个实验里它跟着注入的按键
-        逐次翻转、且**后台无焦点进程也照样跟得上**（低位是全局切换态，不吃线程队列）。
-
-        双保险：同时看 GetAsyncKeyState 的 0x8000（当前是否物理按下）抓"按下沿"。
-        万一 GetKeyState 在某个环境里是陈旧的，就靠按下沿自己翻一次，不会卡死。
+        双保险：再看 GetAsyncKeyState 的 0x8000（当前是否物理按下）抓按下沿，
+        万一 GetKeyState 在某个环境里陈旧，也能自己翻一次，不会卡死。
         """
         self._caps_job = self.root.after(CAPS_POLL_MS, self._poll_caps)
         try:
@@ -3267,11 +3206,9 @@ class DanmakuApp(object):
 
     def _text_for(self, idx):
         """
-        弹幕文案缓存。
-
-        build_text 里带正则清洗和多次拼接，同一本书、同一套参数下结果完全固定，
-        没必要每隔几秒重算一遍 —— 这点开销正好落在 Tk 主线程上，是「顿一下」的帮凶。
-        key 用 text_cache_key（**不能**用序号，原因写在那里）。
+        弹幕文案缓存：build_text 带正则清洗和多次拼接，同一本书 + 同一套参数下结果
+        完全固定，没必要每隔几秒重算一遍（这点开销正好落在 Tk 主线程上）。
+        key 用 text_cache_key（不能用序号，原因写在那里）。
         """
         w = self.words[idx]
         key = text_cache_key(self.book_path, w, self.cfg)
@@ -3299,9 +3236,8 @@ class DanmakuApp(object):
 
     def _schedule_spawn(self):
         """
-        固定间隔：每条弹幕之间的时间恒定，不再等上一条离屏。
-        节奏因此可预期，也不会被某条特别长的释义拖住整条队列。
-        同屏条数由 max_on_screen 兜底，靠轨道分配避免文字叠在一起。
+        固定间隔：每条弹幕之间的时间恒定，不再等上一条离屏 —— 节奏可预期，
+        也不会被某条特别长的释义拖住整条队列。同屏条数由 max_on_screen 兜底。
         """
         if not self.running:
             return
@@ -3385,10 +3321,7 @@ class DanmakuApp(object):
         self._save_later()
 
     def _save_later(self, delay=700):
-        """
-        拖滑块会一次产生上百次改动，逐次写盘太浪费。
-        延迟合并：700ms 内没有新改动才真正落盘。
-        """
+        """拖滑块一次会产生上百次改动，逐次写盘太浪费：延迟合并，静下来才真落盘。"""
         if self._save_job:
             try:
                 self.root.after_cancel(self._save_job)
@@ -3466,12 +3399,9 @@ class DanmakuApp(object):
 
     def _bind_hotkeys(self):
         """
-        热键分两条路，但**同一个键只会生效一路**，不会按一下触发两次：
-
-          · 首选系统级 RegisterHotKey（见 GlobalHotkeys）—— 面板收起（withdraw）
-            之后整个应用没有键盘焦点，Tk 的 bind_all 那套会整个哑掉，而 README
-            一直写着「Ctrl+Alt+Q 退出」；
-          · 注册失败（被别的程序占着）才退回 bind_all：至少面板/把手有焦点时能用。
+        热键分两条路，但**同一个键只会生效一路**，不会按一下触发两次：首选系统级
+        RegisterHotKey（为什么非这样不可见 GlobalHotkeys），注册失败（被别的程序
+        占着）才退回 bind_all —— 至少面板/把手有焦点时还能用。
         """
         self._hotkey_q = queue.Queue()
         self._hotkeys = GlobalHotkeys(self._hotkey_q.put)
