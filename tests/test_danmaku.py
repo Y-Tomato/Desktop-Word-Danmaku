@@ -367,5 +367,41 @@ class GlobalHotkeysTest(unittest.TestCase):
             hk.stop()
 
 
+class SliderWidgetTest(unittest.TestCase):
+    """番茄滑块把「标题 + 数值」收进自己身上之后，数值标签得跟着 value 走。"""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.root = danmaku.tk.Tk()
+        except Exception as e:          # 没有图形环境（比如 CI）就跳过
+            raise unittest.SkipTest("没有可用的 Tk 环境：%r" % (e,))
+        cls.root.withdraw()             # 别真的弹一个窗口出来
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.root.destroy()
+        except Exception:
+            pass
+
+    def test_float_label_follows_value(self):
+        s = danmaku.TomatoSlider(self.root, 0.0, 1.0, 0.5,
+                                 lambda v: "%.0f%%" % (v * 100))
+        self.assertEqual(s.display(), "50%")
+        s.set(0.42)
+        self.assertEqual(s.var.get(), "42%")
+        s.set(2.0)                      # 超出范围要钳到上界
+        self.assertEqual(s.get(), 1.0)
+        self.assertEqual(s.var.get(), "100%")
+
+    def test_int_label_is_integer(self):
+        s = danmaku.TomatoSlider(self.root, 1, 8, 5, str, integer=True)
+        self.assertEqual(s.display(), "5")
+        s.set(3.7)                      # 整数档要四舍五入，而且不能显示成 "4.0"
+        self.assertEqual(s.get(), 4)
+        self.assertEqual(s.var.get(), "4")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

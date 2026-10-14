@@ -204,16 +204,9 @@ POS_RE = re.compile(r"^\s*([a-zA-Z]{1,6}\.)\s*(.+)$")
 #（弹幕上显示成 "acquire  v.；获得"）。实测：4 本词书里那一份 acquire 全中。
 POS_GAP_RE = re.compile(r"([a-zA-Z]{1,6}\.)\s+")
 
-# 标点归一化表：把「主字体画不出」的标点换成它自带的等价符号。
-#
-# 现状：**空表，不替换任何标点**。
-# 早期版本这里塞了 ；，（）：。 等一整套映射，依据是"萝莉体缺全角标点"——
-# 那个结论来自一次错误的 cmap 解析（把字形索引当成了字符码）。
-# 重测后萝莉体对 ；，。（）：【】／｜～？！．、… — · 全部有字形，
-# 直接用中文标点渲染即可，用户也明确要求分号用中文标点。
-# 换其它字体时如果真撞上缺标点，缺字回退机制（split_runs）会自动兜住，
-# 这个表只作应急用。
-PUNCT_MAP = {}
+# 标点不做任何替换：萝莉体对 ；，。（）：【】／｜～？！．、… — · 全部有字形
+#（早期"缺全角标点"的结论来自一次错误的 cmap 解析，把字形索引当成了字符码）。
+# 换别的字体真撞上缺字时，split_runs 的逐字回退会自动兜住。
 
 # 出现区域：内部值 -> 面板显示
 BAND_LABELS = {
@@ -395,6 +388,23 @@ def _bgra_to_png(w, h, bgra, key_rgb):
             chunk(b"IEND", b""))
 
 
+def stroke_offsets(font_px):
+    """
+    8 向描边的偏移量 + 位图留白。
+
+    **预渲染路径（render_text_bitmap）和退路（逐段 text）必须用同一套参数**，
+    否则两条路画出来的描边不一样。
+
+    只画 4 个对角副本 = 用菱形膨胀字身，笔画拐弯和弧线上会留下约 ov 像素的台阶；
+    补上四个正方向后才是真正的八边形膨胀：直边厚度不变、拐角与曲线变圆。
+    斜角副本取 0.7×ov，抵掉 √2 的几何拉伸。
+    """
+    ov = max(1, font_px // 22)
+    ov2 = max(1, (ov * 7) // 10)
+    return ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
+            (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2)), ov + 1
+
+
 def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
                        ascent, linespace):
     """
@@ -417,11 +427,7 @@ def render_text_bitmap(runs, font_px, face_main, face_fall, color_rgb,
         f_main = _gdi_font(font_px, face_main)
         f_fall = _gdi_font(font_px, face_fall, True)
 
-        ov = max(1, font_px // 22)
-        ov2 = max(1, (ov * 7) // 10)
-        offs = ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
-                (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
-        pad = ov + 1
+        offs, pad = stroke_offsets(font_px)
 
         total = 0
         for ok, s in runs:
@@ -742,7 +748,6 @@ class FontSet(object):
     """
 
     def __init__(self):
-        self.custom_path = None
         self.custom_family = None
         self.covered = set()
         self.available = False
@@ -764,7 +769,6 @@ class FontSet(object):
             ctypes.windll.gdi32.AddFontResourceExW(path, FR_PRIVATE, 0)
         except Exception:
             pass
-        self.custom_path = path
         self.custom_family = family
         self.covered = _ttf_codepoints(path)
         self.available = True
@@ -894,9 +898,7 @@ class IconSet(object):
 
     def __init__(self):
         self.big = None       # 原尺寸（32px），用于面板角标与窗口图标
-        self.mid = None       # 缩小一半
-        self.handle = None    # 64px 放大版，用于右下角把手
-        self.path = None
+        self.handle = None    # 96px 放大版，用于右下角把手
 
     def load(self, master):
         if not os.path.exists(LOGO_PATH):
@@ -905,13 +907,7 @@ class IconSet(object):
             img = tk.PhotoImage(master=master, file=LOGO_PATH)
         except Exception:
             return False
-        self.path = LOGO_PATH
         self.big = img
-        # 32px 的图放进 38px 标题栏里略显臃肿，缩一半更精致
-        try:
-            self.mid = img.subsample(2, 2)
-        except Exception:
-            self.mid = img
         self.handle = img
         if os.path.exists(LOGO_HANDLE_PATH):
             try:
@@ -929,11 +925,6 @@ ICONS = IconSet()
 
 
 # ---------------------------------------------------------------- 数据
-
-def normalize_punct(s):
-    """把自定义字体没有的全角标点换成它自带的等价符号。"""
-    return "".join(PUNCT_MAP.get(c, c) for c in s)
-
 
 def clean_item(s):
     """释义清洗：去掉括号/学科标注里的补充说明，保持弹幕简短。"""
@@ -1169,8 +1160,7 @@ def build_text(w, cfg):
     for pos, items in picked:
         cn = shorten_cn("；".join(items), int(cfg.get("max_cn_len", 30)))
         segs.append(("%s %s" % (pos, cn)) if pos else cn)
-    txt = w["word"] + "  " + "  ".join([s for s in segs if s.strip()])
-    return normalize_punct(txt).strip()
+    return (w["word"] + "  " + "  ".join([s for s in segs if s.strip()])).strip()
 
 
 def text_cache_key(book_path, word, cfg):
@@ -1240,7 +1230,6 @@ class DanmakuLayer(object):
                                      # 只比 alpha 会把「切回穿透」整个跳过去
 
         self.band_h = 0
-        self.top = 0
         self._geo = None      # 当前窗口 geometry 字符串，用于 relayout 幂等判断
         self.relayout()
 
@@ -1333,7 +1322,7 @@ class DanmakuLayer(object):
         if geo == self._geo:      # 幂等：位置尺寸没变就不动窗口，省一次重绘
             return
         self._geo = geo
-        self.band_h, self.top = band, top
+        self.band_h = band
         self.win.geometry(geo)
         self.canvas.config(width=self.sw, height=band)
 
@@ -1509,14 +1498,7 @@ class DanmakuLayer(object):
                 img = None
         if img is None:
             # 退路：GDI 出问题时仍走逐段 text + 8 向描边（慢，但画质一模一样）
-            ov = max(1, font_px // 22)
-            ov2 = max(1, (ov * 7) // 10)     # 斜角副本略短一点，抵掉 √2 的几何拉伸
-            # 描边：8 向（上下左右 + 四角）。
-            # 只画 4 个对角副本 = 用"菱形"去膨胀字身，笔画拐弯和弧线上会留下约 1 段
-            # 台阶（`ov` 像素的量化），放大看就是锯齿。补上四个正方向的副本后才是
-            # 真正的八边形膨胀：直边厚度不变、拐角与曲线变圆、台阶被填平。
-            offs = ((-ov, 0), (ov, 0), (0, -ov), (0, ov),
-                    (-ov2, -ov2), (ov2, -ov2), (-ov2, ov2), (ov2, ov2))
+            offs, _ov_pad = stroke_offsets(font_px)
             cx = x
             for ok, s in runs:
                 f = f_main if ok else f_fall
@@ -1732,6 +1714,17 @@ class DanmakuLayer(object):
         fp = self._font_px()
         return fp * 1.05, max(12, int(fp * 0.45))
 
+    @staticmethod
+    def _same_row(a, b, row):
+        """纵向差在 row 以内 = 这两条算同一行。"""
+        return abs(float(a["y"]) - float(b["y"])) < row
+
+    @staticmethod
+    def _overlaps(a, b, pad):
+        """水平方向贴在一起（两条的间距小于 pad）。"""
+        return (float(b["x"]) < float(a["x"]) + float(a["w"]) + pad
+                and float(a["x"]) < float(b["x"]) + float(b["w"]) + pad)
+
     def _blockers(self, it):
         """
         此刻**有哪些**弹幕正压在这一条身上（同一行且水平相交）。
@@ -1740,20 +1733,9 @@ class DanmakuLayer(object):
         就会出现「A 等 B、B 等 A」的死等（两个都不动，谁也不让谁）。
         """
         row, gap = self._row_gap()
-        out = []
-        for o in self.items:
-            if o is it or o is self._hover:
-                continue
-            if abs(float(o["y"]) - float(it["y"])) >= row:
-                continue
-            if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
-                    and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
-                out.append(o)
-        return out
-
-    def _blocked(self, it):
-        """有没有别的弹幕压在这一条身上（只要知道有没有时用这个）。"""
-        return bool(self._blockers(it))
+        return [o for o in self.items
+                if o is not it and o is not self._hover
+                and self._same_row(o, it, row) and self._overlaps(it, o, gap)]
 
     def _release(self, it):
         """
@@ -1846,14 +1828,10 @@ class DanmakuLayer(object):
                 pass
 
     def _clear_of(self, it, others):
-        """it 与 others 里每一个在水平方向上都已拉开 gap 以上。"""
+        """it 与 others 里每一个都已经在水平方向拉开了 gap 以上。"""
         row, gap = self._row_gap()
-        for o in others:
-            if abs(float(o["y"]) - float(it["y"])) < row:
-                if (float(o["x"]) < float(it["x"]) + float(it["w"]) + gap
-                        and float(it["x"]) < float(o["x"]) + float(o["w"]) + gap):
-                    return False
-        return True
+        return not any(self._same_row(o, it, row) and self._overlaps(it, o, gap)
+                       for o in others)
 
     def _tailgate(self, it):
         """
@@ -1869,9 +1847,8 @@ class DanmakuLayer(object):
         row, gap = self._row_gap()
         safe = gap * 2.0
         for o in self.items:
-            if o is it or o.get("hold_for") is it:
-                continue
-            if abs(float(o["y"]) - float(it["y"])) >= row:
+            # 只盯着**前面**那条：后面追上来的由 hold_for 那套负责
+            if o is it or o.get("hold_for") is it or not self._same_row(o, it, row):
                 continue
             if (float(o["x"]) < float(it["x"])
                     and float(o["x"]) + float(o["w"]) + safe > float(it["x"])):
@@ -1902,7 +1879,7 @@ class DanmakuLayer(object):
                 continue
             waited = now - it.get("_wait_t", now)
             # 超时兜底：叠得再离谱也不能让它永远停在原地不动
-            if not self._blocked(it) or waited > UNFREEZE_WAIT_MAX:
+            if not self._blockers(it) or waited > UNFREEZE_WAIT_MAX:
                 it["waiting"] = False
                 it.pop("_wait_t", None)
                 it["frozen"] = False
@@ -2000,7 +1977,7 @@ class DanmakuLayer(object):
         # 也别再按"缺字"把音标拆成多段：实测 msyh.ttc 的 cmap 会被自己的解析器
         # **误报**（ə ɜ ɪ ˈ ː 全判成缺），一拆就混进 Segoe UI，两段字距肉眼可见地不齐。
         # 而雅黑本身这些 IPA 符号一个不缺（`_debug\\_fonttest.py` 渲染对照过）。
-        phf = self._font(PHON_FACE, fpx, False)
+        phf = self._font(PHON_FACE_FALLBACK or PHON_FACE, fpx, False)
         sr = max(8, int(fp * 0.32))
         mr = max(7, int(fp * 0.30))       # 放大镜：比星略小一号，让 ★ 还是主角
         igap = max(8, int(fp * 0.22))     # 两个**图标**之间挨得近一点，
@@ -2221,7 +2198,7 @@ class TomatoSlider(tk.Frame):
     WATCH_MS = 400
 
     def __init__(self, master, lo, hi, value, fmt, command=None, integer=False,
-                 bg=None):
+                 label="", bg=None):
         self._bg = bg or CLR_BG
         tk.Frame.__init__(self, master, bg=self._bg)
         self.lo, self.hi = float(lo), float(hi)
@@ -2229,6 +2206,15 @@ class TomatoSlider(tk.Frame):
         self.fmt = fmt
         self.command = command
         self.value = self._clamp(float(value))
+        # 标题 + 数值标签就长在这个控件上：面板里十来行都是「标题 + 滑块 + 数值」
+        # 同一个形状，让滑块自己管住它们，「恢复默认」也就只剩一句 set()。
+        head = tk.Frame(self, bg=self._bg)
+        head.pack(fill="x")
+        tk.Label(head, text=label, bg=self._bg, fg=CLR_TEXT,
+                 font=("Microsoft YaHei", 9, "bold")).pack(side="left")
+        self.var = tk.StringVar(value=self.display())
+        tk.Label(head, textvariable=self.var, bg=self._bg, fg=CLR_GREEN_DK,
+                 font=("Microsoft YaHei", 9, "bold")).pack(side="right")
         # 注意：不能叫 self._w —— 那是 Tkinter 保留的「控件路径」属性，
         # 覆盖掉它会让后续子控件的命名直接崩掉。
         self._cw = 200
@@ -2267,15 +2253,21 @@ class TomatoSlider(tk.Frame):
     def get(self):
         return self.value
 
+    def display(self):
+        """数值标签上那串字（整数档按整数格式化）。"""
+        return self.fmt(self.value)
+
     def set(self, v, notify=False):
         self.value = self._clamp(float(v))
         self._draw()
+        self.var.set(self.display())
         if notify:
             self._emit()
 
     def _clamp(self, v):
         v = min(max(v, self.lo), self.hi)
-        return float(int(round(v))) if self.integer else v
+        # 整数档直接给 int：数值标签、写进 config 的值都跟着是整数
+        return int(round(v)) if self.integer else v
 
     # -- 坐标换算 ----------------------------------------------
 
@@ -2369,6 +2361,7 @@ class TomatoSlider(tk.Frame):
         if v != self.value:
             self.value = v
             self._draw()
+            self.var.set(self.display())
         return v
 
     # -- 浮现 / 按压动画（自建补间，依然是零依赖） --------------
@@ -2726,7 +2719,7 @@ class DanmakuApp(object):
 
         # 面板分两层：底部按钮永远贴底，中间所有调节项塞进可滚动视口 ——
         # 面板被拖小以后，用右侧滚动条或者鼠标滚轮就能翻到被挤掉的那些设置。
-        self.sliders = {}      # key -> (控件, 数值 StringVar, 格式化函数, 是否整数)
+        self.sliders = {}      # key -> TomatoSlider（数值标签由控件自己管）
         body = tk.Frame(r, bg=CLR_BG)
         body.pack(fill="both", expand=True)
 
@@ -2839,9 +2832,9 @@ class DanmakuApp(object):
                      lambda v: "%.1f%%" % (v * 100))
         self._slider(body, "不透明度", "opacity", 0.25, 1.0,
                      lambda v: "%.0f%%" % (v * 100))
-        self._int_slider(body, "同屏条数上限", "max_on_screen", 1, 8)
-        self._int_slider(body, "释义条数（前 N 个）", "max_meanings", 1, 4)
-        self._int_slider(body, "最多词性数", "max_pos", 1, 3)
+        self._slider(body, "同屏条数上限", "max_on_screen", 1, 8, str, integer=True)
+        self._slider(body, "释义条数（前 N 个）", "max_meanings", 1, 4, str, integer=True)
+        self._slider(body, "最多词性数", "max_pos", 1, 3, str, integer=True)
 
         # 区域
         row = tk.Frame(body, bg=CLR_BG)
@@ -2970,50 +2963,16 @@ class DanmakuApp(object):
         self._apply_live()
         self._refresh_book_label()
 
-    def _slider(self, parent, label, key, lo, hi, fmt):
-        f = tk.Frame(parent, bg=CLR_BG)
-        f.pack(fill="x", pady=(5, 0))
-        head = tk.Frame(f, bg=CLR_BG)
-        head.pack(fill="x")
-        tk.Label(head, text=label, bg=CLR_BG, fg=CLR_TEXT,
-                 font=("Microsoft YaHei", 9, "bold")).pack(side="left")
-        val = self.cfg.get(key, lo)
-        var = tk.StringVar(value=fmt(float(val)))
-        tk.Label(head, textvariable=var, bg=CLR_BG, fg=CLR_GREEN_DK,
-                 font=("Microsoft YaHei", 9, "bold")).pack(side="right")
-
+    def _slider(self, parent, label, key, lo, hi, fmt, integer=False):
+        """一行参数：标题 + 数值 + 番茄滑块。整数档传 integer=True + fmt=str。"""
         def on_change(v):
-            fv = float(v)
-            self.cfg[key] = fv
-            var.set(fmt(fv))
+            self.cfg[key] = v          # v 已经是钳过、取整过的值
             self._apply_live()
 
-        s = TomatoSlider(f, lo, hi, float(val), fmt, command=on_change)
-        s.pack(fill="x")
-        self.sliders[key] = (s, var, fmt, False)   # 「恢复默认」要用它回写显示值
-        return s
-
-    def _int_slider(self, parent, label, key, lo, hi):
-        f = tk.Frame(parent, bg=CLR_BG)
-        f.pack(fill="x", pady=(5, 0))
-        head = tk.Frame(f, bg=CLR_BG)
-        head.pack(fill="x")
-        tk.Label(head, text=label, bg=CLR_BG, fg=CLR_TEXT,
-                 font=("Microsoft YaHei", 9, "bold")).pack(side="left")
-        iv = int(self.cfg.get(key, lo))
-        var = tk.StringVar(value=str(iv))
-        tk.Label(head, textvariable=var, bg=CLR_BG, fg=CLR_GREEN_DK,
-                 font=("Microsoft YaHei", 9, "bold")).pack(side="right")
-
-        def on_change(v):
-            n = int(round(float(v)))
-            self.cfg[key] = n
-            var.set(str(n))
-            self._apply_live()
-
-        s = TomatoSlider(f, lo, hi, iv, str, command=on_change, integer=True)
-        s.pack(fill="x")
-        self.sliders[key] = (s, var, str, True)
+        s = TomatoSlider(parent, lo, hi, float(self.cfg.get(key, lo)), fmt,
+                         command=on_change, integer=integer, label=label)
+        s.pack(fill="x", pady=(5, 0))
+        self.sliders[key] = s
         return s
 
     def _make_draggable(self, widget):
@@ -3087,11 +3046,9 @@ class DanmakuApp(object):
         for k, v in DEFAULT_CONFIG.items():
             if k not in KEEP:
                 self.cfg[k] = v
-        # 滑块 + 数值标签回写
-        for key, (widget, var, fmt, is_int) in self.sliders.items():
-            v = self.cfg.get(key, 0)
-            widget.set(v)
-            var.set(fmt(int(round(float(v)))) if is_int else fmt(float(v)))
+        # 滑块 + 数值标签回写（set() 会顺手刷新它自己的数值标签）
+        for key, widget in self.sliders.items():
+            widget.set(self.cfg.get(key, 0))
         # 复选框 / 下拉框回写
         self.rc_var.set(bool(self.cfg.get("random_color")))
         self.band_var.set(BAND_LABELS.get(self.cfg.get("band_mode"),
