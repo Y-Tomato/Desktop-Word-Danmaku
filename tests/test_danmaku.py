@@ -403,5 +403,157 @@ class SliderWidgetTest(unittest.TestCase):
         self.assertEqual(s.var.get(), "4")
 
 
+# ---------------------------------------------------------------- 读音文件
+
+class AudioLookupTest(unittest.TestCase):
+    """
+    点喇叭按单词找音频。这里用临时目录造几个文件来验，不碰真的 audio\\。
+
+    查找必须宽容：词表里的词和抓下来的文件名未必字字相同（大小写、
+    `a.m.` 这类带点的词），找一个都不中就静音，但**能对上就别放过**。
+    """
+
+    def setUp(self):
+        self.dir = _mkdtemp()
+        for name in ("verbal.mp3", "A.M..mp3", "well-being.mp3", "_failed.txt"):
+            with open(os.path.join(self.dir, name), "wb") as f:
+                f.write(b"x")
+        danmaku._audio_index_cache.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_exact_hit(self):
+        p = danmaku.audio_path_for("verbal", self.dir)
+        self.assertEqual(os.path.basename(p), "verbal.mp3")
+
+    def test_case_insensitive(self):
+        p = danmaku.audio_path_for("VERBAL", self.dir)
+        self.assertEqual(os.path.basename(p), "verbal.mp3")
+
+    def test_punctuation_fallback(self):
+        """`a.m.` 里的点、连字符丢掉了也还能找回来。"""
+        self.assertEqual(os.path.basename(danmaku.audio_path_for("a.m.", self.dir)),
+                         "A.M..mp3")
+        self.assertEqual(os.path.basename(danmaku.audio_path_for("well being", self.dir)),
+                         "well-being.mp3")
+
+    def test_non_audio_file_ignored(self):
+        self.assertIsNone(danmaku.audio_path_for("_failed", self.dir))
+
+    def test_missing_and_empty(self):
+        self.assertIsNone(danmaku.audio_path_for("nothere", self.dir))
+        self.assertIsNone(danmaku.audio_path_for("", self.dir))
+        self.assertIsNone(danmaku.audio_path_for(None, self.dir))
+
+    def test_broken_dir_is_silent(self):
+        self.assertIsNone(danmaku.audio_path_for("verbal", os.path.join(self.dir, "无此目录")))
+
+
+# ---------------------------------------------------------------- 信息行图标
+
+class HoverIconLayoutTest(unittest.TestCase):
+    """
+    信息行右端「喇叭 · 放大镜 · 星」的坐标。
+
+    这些数字以前是**两套**各写一遍的算式（框要撑多宽 / 图标画在哪），一旦对不上
+    就是图标静悄悄跑到框外。下面几条断言专门盯这类漂移。
+    """
+
+    SR, MR, HR, IGAP, IPAD, GAP = 20, 18, 20, 14, 40, 20
+
+    def _lay(self, bx1=1000.0):
+        return danmaku.hover_icons(bx1, 100.0, self.IPAD, self.GAP,
+                                   self.SR, self.MR, self.HR, self.IGAP)
+
+    def test_left_to_right_order(self):
+        ic = self._lay()
+        self.assertLess(ic["sound"], ic["dict"])
+        self.assertLess(ic["dict"], ic["star"])
+
+    def test_icon_gaps_match_the_constants(self):
+        ic = self._lay()
+        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.IGAP + self.MR)
+        self.assertAlmostEqual(ic["star"] - ic["dict"], self.MR + self.IGAP + self.SR)
+
+    def test_star_sits_at_the_right_padding(self):
+        ic = self._lay(1000.0)
+        self.assertAlmostEqual(ic["star"] + self.SR, 1000.0 - self.IPAD)
+
+    def test_back_is_just_wide_enough(self):
+        """
+        把框撑到 `ipad + 音标宽 + back` 之后，音标得到的可用宽度内**正好**装得下
+        那么宽的音标 —— 这就是"框变宽但图标没跟着挪"那类漂移的守门断言。
+        """
+        bx0, acc_w = 0.0, 120.0
+        need = self.IPAD + acc_w + self._lay()["back"]
+        ic = danmaku.hover_icons(bx0 + need, 100.0, self.IPAD, self.GAP,
+                                 self.SR, self.MR, self.HR, self.IGAP)
+        self.assertAlmostEqual(ic["txt_r"] - (bx0 + self.IPAD), acc_w)
+        self.assertGreater(ic["txt_r"], bx0)
+
+    def test_every_icon_stays_inside_the_box(self):
+        bx0, acc_w = 0.0, 120.0
+        need = self.IPAD + acc_w + self._lay()["back"]
+        bx1 = bx0 + need
+        ic = danmaku.hover_icons(bx1, 100.0, self.IPAD, self.GAP,
+                                 self.SR, self.MR, self.HR, self.IGAP)
+        for key, r in (("sound", self.HR), ("dict", self.MR), ("star", self.SR)):
+            self.assertGreaterEqual(ic[key] - r, bx0, "%s 跑到框左边外面了" % key)
+            self.assertLessEqual(ic[key] + r, bx1, "%s 跑到框右边外面了" % key)
+
+    def test_hit_boxes_do_not_overlap(self):
+        """
+        三个命中框各自外扩 3px，图标之间的空当（igap）要留得比这更大，
+        否则会出现"点两个图标中间，却触发了其中一个"。
+        """
+        ic = self._lay()
+        self.assertGreater(self.IGAP, 6)
+        self.assertGreaterEqual(ic["dict"] - self.MR - 3 - (ic["sound"] + self.HR + 3), 0)
+        self.assertGreaterEqual(ic["star"] - self.SR - 3 - (ic["dict"] + self.MR + 3), 0)
+
+    def test_speaker_fits_in_its_half_size(self):
+        """喇叭的顶点都该落在 ±r 里，_icon_box 的退路（按 r 估框）才是对的。"""
+        pts = danmaku.speaker_pts(0.0, 0.0, 10.0)
+        xs, ys = pts[0::2], pts[1::2]
+        self.assertGreaterEqual(min(xs), -10.0)
+        self.assertLessEqual(max(xs), 10.0)
+        self.assertLessEqual(max(abs(v) for v in ys), 10.0)
+
+    def test_click_boxes_use_the_drawn_ink(self):
+        """
+        镜片**圆圈内部**必须在放大镜命中框里（宇专门提过这条）。
+
+        判定框取的是"画出来的墨迹"而不是推出来的尺寸，所以这条只能连真画布一起验：
+        空心的圆里那一片空当也得算在判定区里。
+        """
+        try:
+            root = danmaku.tk.Tk()
+        except Exception as e:
+            raise unittest.SkipTest("没有可用的 Tk 环境：%r" % (e,))
+        try:
+            root.withdraw()
+            cfg = dict(danmaku.DEFAULT_CONFIG)
+            layer = danmaku.DanmakuLayer(root, cfg, 1200, 800, danmaku.FONTS)
+            layer.canvas.delete("all")
+            sr, mr, hr = 20, 18, 20
+            ic = danmaku.hover_icons(900.0, 60.0, 30, 20, sr, mr, hr, 14)
+            c = layer.canvas
+            dids = [c.create_oval(ic["dict"] - 11, 49, ic["dict"] + 11, 71,
+                                  outline="#fff", width=5),
+                    c.create_line(ic["dict"] + 8, 68, ic["dict"] + 20, 80,
+                                  fill="#fff", width=6)]
+            box = layer._icon_box(dids, ic["dict"], 60.0, mr)
+            lens_cx, lens_cy = ic["dict"], 60.0        # 圆心：靠挪正保证落在这里
+            self.assertTrue(box[0] <= lens_cx <= box[2] and box[1] <= lens_cy <= box[3],
+                            "镜片圆心 %s 不在命中框 %s 里" % ((lens_cx, lens_cy), box))
+            layer.destroy()
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

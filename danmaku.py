@@ -98,6 +98,11 @@ BOOK_FIELDS = ["word", "accent", "mean_cn"]
 # 透明色键：该颜色会被 Windows 完全抠掉，窗口其余部分照常绘制
 TRANSPARENT_KEY = "#010203"
 
+# 单词读音：audio\<单词>.mp3 —— tools\fetch_audio.py 从有道词典抓的。
+# 几千个小文件、几十 MB，不适合进仓库（.gitignore 已排除），本地有就能点响、没有就静音。
+AUDIO_DIR = os.path.join(APP_DIR, "audio")
+AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
+
 # 图标（用户放在 logo/ 里的番茄女孩）
 LOGO_PATH = os.path.join(APP_DIR, "logo", "TomatoGirl_Logo.png")
 # 把手的放大版：高分屏下 32px 原图只有半个逻辑厘米，太小了点不着 / 拖不动
@@ -148,6 +153,9 @@ CLR_STAR_OFF_BR = "#7A7A7A"
 # 靠形状区分就够了（一个实心星、一个线稿镜片），再换个颜色反而显得没整理。
 CLR_DICT       = "#E9E9E9"
 CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
+# 喇叭（读音）图标：和放大镜同档浅灰，三个图标同级、靠形状区分
+CLR_SOUND      = "#E9E9E9"
+CLR_SOUND_HL   = "#FFC53D"  # 出声也有起播延迟（MCI open + 解码），同样先亮一下
 
 # 点放大镜要跳的查词页（{w} 是转义后的单词）
 DICT_URL = "https://dict.youdao.com/result?word={w}&lang=en"
@@ -1118,6 +1126,112 @@ def load_words(path=DATA_CSV):
     return rows
 
 
+_audio_index_cache = {}      # {目录: (mtime, {小写文件名: 完整路径})}
+
+
+def audio_index(audio_dir=None):
+    """
+    audio\\ 下「文件名(小写、去扩展名) → 完整路径」。扫一次就缓存。
+
+    几千个文件，点一下喇叭扫一遍目录是不能接受的；用目录 mtime 当版本号，
+    重新抓过音频（mtime 变了）会自动重建索引。
+    """
+    root = os.path.abspath(audio_dir or AUDIO_DIR)
+    try:
+        stamp = os.path.getmtime(root)
+    except OSError:
+        return {}
+    hit = _audio_index_cache.get(root)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    idx = {}
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return {}
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        if not stem or ext.lower() not in AUDIO_EXTS:
+            continue
+        full = os.path.join(root, name)
+        idx.setdefault(stem.lower(), full)
+        # 再存一份「只留字母数字」的键：词表里 `well being` 要能捞到 `well-being.mp3`。
+        flat = re.sub(r"[^0-9a-z]+", "", stem.lower())
+        if flat:
+            idx.setdefault(flat, full)
+    _audio_index_cache[root] = (stamp, idx)
+    return idx
+
+
+def audio_path_for(word, audio_dir=None):
+    """
+    单词 → 读音文件；没有就 None（没抓音频的词静音，不是错误）。
+
+    Windows 文件名不区分大小写，所以小写键就够。再拿「只留字母数字」的形态兜一次：
+    词表里 `a.m.` 这种带点的词，换个词表或换次抓取脚本就可能对不上。
+    """
+    w = (word or "").strip()
+    if not w:
+        return None
+    idx = audio_index(audio_dir)
+    low = w.lower()
+    hit = idx.get(low)
+    if hit:
+        return hit
+    flat = re.sub(r"[^0-9a-z]+", "", low)
+    return idx.get(flat) if flat else None
+
+
+class WordAudio(object):
+    """
+    单词读音播放：winmm 的 MCI（系统自带 MPEG 解码，零第三方依赖）。
+
+    `winsound` 只能播 wav，而 audio\\ 里是 mp3 —— 只能借 MCI 的 mpegvideo 设备。
+
+    ⚠️ 同一个 alias 不能 open 两次：alias 已存在时 open 直接失败、且**不会**替换句柄，
+    症状是"第一次点有声音、之后怎么点都没反应"。所以换文件才 open/close，
+    同一个词再点就 `play from 0` 从头播。
+    """
+    ALIAS = "dmvoice"
+
+    def __init__(self):
+        self.path = None
+        self._mci = None
+        try:
+            fn = ctypes.windll.winmm.mciSendStringW
+            fn.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p,
+                           ctypes.c_uint, ctypes.c_void_p]
+            fn.restype = ctypes.c_uint
+            self._mci = fn
+        except Exception:
+            log_event("MCI 不可用：点喇叭不会出声")
+
+    def _cmd(self, cmd):
+        try:
+            return int(self._mci(cmd, None, 0, None))
+        except Exception:
+            return 1
+
+    def play(self, path):
+        if self._mci is None or not path:
+            return False
+        if path == self.path:
+            return self._cmd("play %s from 0" % self.ALIAS) == 0
+        self.close()
+        if self._cmd('open "%s" type mpegvideo alias %s' % (path, self.ALIAS)):
+            # 少数容器（wav/ogg）不认 mpegvideo，退回让 MCI 自己挑设备
+            if self._cmd('open "%s" alias %s' % (path, self.ALIAS)):
+                log_event("读音打不开：%s" % path)
+                return False
+        self.path = path
+        return self._cmd("play %s" % self.ALIAS) == 0
+
+    def close(self):
+        if self.path:
+            self._cmd("close %s" % self.ALIAS)
+            self.path = None
+
+
 def build_text(w, cfg):
     """
     单词 + 词性 + 中文释义；多词性时「词性+释义」后面接下一个「词性+释义」。
@@ -1154,6 +1268,43 @@ def text_cache_key(book_path, word, cfg):
             cfg.get("per_pos_meanings"), cfg.get("max_cn_len"))
 
 
+# ------------------------------------------------------------ 悬停信息行布局
+
+def hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap):
+    """
+    信息行右端三个图标的横向位置：从左到右 **喇叭 · 放大镜 · 星**。
+
+    抽成纯函数是为了能单测。以前 `need`（框要撑多宽）和三个中心点是**两套**各写
+    一遍的算式，一旦对不上就是"框变宽了但图标还按老位置画"——图标被画到框外，
+    不报错、只是看着别扭，靠肉眼很难发现。现在两边都从这一份坐标推出来。
+
+    返回 dict：三个中心 x（y 都是 cy）、音标可用的右界 txt_r、以及 `back`
+    ——「从框右沿退回音标右界」的宽度，调用方用它算框至少要撑多宽。
+    """
+    star_cx = bx1 - ipad - sr
+    dict_cx = star_cx - sr - igap - mr
+    snd_cx = dict_cx - mr - igap - hr
+    return {
+        "sound": snd_cx, "dict": dict_cx, "star": star_cx,
+        "txt_r": snd_cx - hr - gap,
+        "back": ipad + sr * 2 + igap + mr * 2 + igap + hr * 2 + gap,
+    }
+
+
+def speaker_pts(cx, cy, r):
+    """
+    小喇叭的轮廓（实心）：左边一个方形箱体，右边一个朝右张开的喇叭口。
+
+    这里**不画线稿** —— 这个字号下喇叭身只有几个像素宽，空心画出来是一团乱麻，
+    跟旁边同样是线稿的放大镜也分不开（那才真是"糊成一坨"）。
+    """
+    x0 = cx - r * 0.95          # 箱体左沿
+    x1 = cx - r * 0.30          # 箱体右沿
+    x2 = cx + r * 0.12          # 喇叭口
+    return [x0, cy - r * 0.30, x1, cy - r * 0.30, x2, cy - r * 0.72,
+            x2, cy + r * 0.72, x1, cy + r * 0.30, x0, cy + r * 0.30]
+
+
 # ---------------------------------------------------------------- 弹幕层
 
 class DanmakuLayer(object):
@@ -1183,6 +1334,7 @@ class DanmakuLayer(object):
         self.interactive = False
         self.fav_state = None     # (word) -> bool，由 App 注入
         self.fav_toggle = None    # (word_dict) -> bool，切换收藏并返回新状态
+        self._audio = WordAudio() # 点喇叭读音（MCI 句柄跟着窗口一起释放，见 destroy）
         self._hover = None        # 当前被悬停、已冻结的那一条
         self._hover_job = None
         self._seq = 0
@@ -1622,10 +1774,11 @@ class DanmakuLayer(object):
             pass
         if it is None:
             return
-        it.pop("_hitbox", None)
-        it.pop("_star_box", None)
-        it.pop("_dict_box", None)
-        it.pop("_dict_hl", None)
+        # 命中框与高亮态都是"这一轮悬停"的临时数据，换焦点就清掉，
+        # 免得下一条复用同一个 dict 时误判（之前 _star_box 就这么漏过一次）
+        for k in ("_hitbox", "_sound_box", "_dict_box", "_star_box",
+                  "_sound_hl", "_dict_hl"):
+            it.pop(k, None)
         w = it.get("word")
         if self.fav_state and w:
             it["_fav"] = bool(self.fav_state(w.get("word")))
@@ -1864,6 +2017,45 @@ class DanmakuLayer(object):
             pts += [cx + rr * math.cos(ang), cy + rr * math.sin(ang)]
         return pts
 
+    def _recenter(self, ids, cx, cy):
+        """
+        把一组图元按**画出来的墨迹**整体挪正到 (cx, cy)，返回挪完的联合 bbox。
+
+        别在纸上推"圆心应该在哪儿"：线宽会往外扩、描边算不算进 Tk 的 bbox 也没个
+        准数（放大镜推出的圆心实测偏右下 2px 多）。让像素自己说话，与线宽/字号无关。
+        """
+        try:
+            gb = self.canvas.bbox(*ids)
+        except Exception:
+            return None
+        if not gb:
+            return None
+        dx = cx - (gb[0] + gb[2]) / 2.0
+        dy = cy - (gb[1] + gb[3]) / 2.0
+        for i in ids:
+            self.canvas.move(i, dx, dy)
+        try:
+            return self.canvas.bbox(*ids)
+        except Exception:
+            return None
+
+    def _icon_box(self, ids, cx, cy, r):
+        """
+        把图标挪正到 (cx, cy)，返回它的命中框（外扩 3px）。
+
+        命中框一律取**画出来的墨迹**，不取推出来的尺寸：这样图标里那些"空心的
+        地方"（最典型的就是放大镜镜片**圆圈内部**）天然算在判定区里，以后图标
+        形状怎么改都不用同步改命中框。挪正失败就退回按尺寸估的方框。
+
+        （顺带记一笔：镜面内部是能被点中的 —— 色键抠掉的像素属于**绘制**，
+        不影响鼠标命中，别照"空心就点不着"的老结论去改设计。`_debug\\_clickprobe.py`
+        发真实左键验过。）
+        """
+        bb = self._recenter(ids, cx, cy)
+        if bb:
+            return (bb[0] - 3, bb[1] - 3, bb[2] + 3, bb[3] + 3)
+        return (cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3)
+
     def _fit(self, font, s, max_w):
         """把字符串裁到 max_w 像素内，超了补省略号。"""
         if max_w <= 8 or font.measure(s) <= max_w:
@@ -1875,7 +2067,7 @@ class DanmakuLayer(object):
 
     def _draw_hover(self, it):
         """
-        悬停信息框：圆角灰底 + 下方一行「音标 … ★」。
+        悬停信息框：圆角灰底 + 下方一行「音标 … 🔊 🔍 ★」。
 
         半透明走 stipple 而不是 alpha：layered 窗口只有一个全局 alpha，做不到
         "只有这块半透明"；stipple 漏空的像素露出的正是色键色、会被整块抠掉，
@@ -1932,18 +2124,24 @@ class DanmakuLayer(object):
         # **误报**（ə ɜ ɪ ˈ ː 全判成缺），一拆就混进 Segoe UI，两段字距肉眼可见地不齐。
         # 而雅黑本身这些 IPA 符号一个不缺（`_debug\\_fonttest.py` 渲染对照过）。
         phf = self._font(PHON_FACE_FALLBACK or PHON_FACE, fpx, False)
-        sr = max(8, int(fp * 0.32))
+        sr = max(8, int(fp * 0.32))       # ★
         mr = max(7, int(fp * 0.30))       # 放大镜：比星略小一号，让 ★ 还是主角
+        hr = max(8, int(fp * 0.32))       # 喇叭
         igap = max(8, int(fp * 0.22))     # 两个**图标**之间挨得近一点，
                                           # 音标 ↔ 图标那一段用 gap，一眼看得出是两组
 
-        # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下
-        need = (ipad + (phf.measure(acc) if acc else 0) + gap
-                + mr * 2 + igap + sr * 2 + ipad)
+        # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下。
+        # 这里的 back（右侧图标组总共占多宽）和下面三个中心点都出自同一个
+        # hover_icons()：以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，
+        # 一旦对不上就是框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
+        # back 与 bx1 无关，所以先用当前 bx1 要一次宽度、撑完框再要一次位置。
+        need = (ipad + (phf.measure(acc) if acc else 0)
+                + hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap)["back"])
         if bx1 - bx0 < need:
             bx1 = bx0 + need
         bx1 = min(bx1, float(self.sw - 2))
         bx0 = max(0.0, min(bx0, bx1 - 40))
+        ic = hover_icons(bx1, cy, ipad, gap, sr, mr, hr, igap)
 
         box = self._round_rect(bx0, top, bx1, bot, max(6, int(fp * 0.22)),
                                fill=CLR_HOVER_BG, stipple="gray50",
@@ -1957,58 +2155,70 @@ class DanmakuLayer(object):
         except Exception:
             pass
 
-        # 右端依次是「放大镜 ★」：★ 贴着右留白，放大镜再往左退一步
-        scx = bx1 - ipad - sr
-        dcx = scx - sr - igap - mr
+        # 右端依次是「喇叭 放大镜 ★」，位置全部由 ic 给出（不再各算一遍）
         txt_l = bx0 + ipad
-        txt_r = dcx - mr - gap
         # 光学修正：anchor="w" 是把**字体行盒**按 cy 居中，而音标的墨迹（x 高区
         # 加上 / 和 p 的下伸）整体偏下，实测比行盒中心低约 0.15em。不修的话
-        # 音标看着比右边的星低半个笔画。星星是几何图形，它就在 cy 上。
+        # 音标看着比右边的星低半个笔画。图标是几何图形，它们就在 cy 上。
         ty = cy - fpx * 0.15
-        if acc and txt_r > txt_l:
+        if acc and ic["txt_r"] > txt_l:
             # 不描边、不打暗影：描边会把 IPA 符号糊成一坨，暗影又像"带边框"
-            seg = self._fit(phf, acc, txt_r - txt_l)
+            seg = self._fit(phf, acc, ic["txt_r"] - txt_l)
             if seg:
                 c.create_text(txt_l, ty, text=seg, anchor="w", fill=CLR_HOVER_TEXT,
                               font=phf, tags=("hoverui",))
-        # 查词放大镜：空心镜片 + 45° 手柄的**线稿**。做成实心块会跟右边的 ★ 糊成一坨，
-        # 而且一实心就丢了"这是个放大镜"的意思。
-        # 手柄是往右下伸的，圆心得先往左上补一段（这里的 -0.219·r 只是个起手估算）：
-        # 真正居中靠下面那步"按画出来的墨迹再把整体挪正" —— 线宽会往外扩、
-        # 描边到底算不算进 bbox 也没个准数，在纸上凑系数不如让像素自己说话。
-        cr = mr * 0.62                                  # 镜片半径
-        ccx, ccy = dcx - mr * 0.219, cy - mr * 0.219    # 镜片圆心
+
+        # —— 喇叭（读音）：实心喇叭 + 两道声波弧 ——
+        scl = CLR_SOUND_HL if it.get("_sound_hl") else CLR_SOUND
+        sids = [c.create_polygon(speaker_pts(ic["sound"], cy, hr), fill=scl,
+                                 outline="", tags=("hoverui",))]
+        # 声波弧：Tk 的角度自 3 点钟起、逆时针为正，所以 -52°~+52° 正好是椭圆
+        # 靠右的那一段（看着才是朝右扩散的声波，而不是两个括号）
+        for k in (0.45, 0.80):
+            r = hr * k
+            ax = ic["sound"] + hr * 0.12
+            sids.append(c.create_arc(ax - r, cy - r, ax + r, cy + r,
+                                     start=-52, extent=104, style="arc",
+                                     outline=scl, width=max(1.0, hr * 0.20),
+                                     tags=("hoverui",)))
+        it["_sound_box"] = self._icon_box(sids, ic["sound"], cy, hr)
+
+        # —— 放大镜（查词）：镜片 + 45° 手柄的线稿 ——
+        # 镜片圆心先按 -0.219·r 往左上估个位置，真正居中交给 _icon_box 里的
+        # "按墨迹挪正" —— 推出来的值实测会偏右下 2px 多。
+        cr = mr * 0.62
+        ccx, ccy = ic["dict"] - mr * 0.219, cy - mr * 0.219
         lw = max(1.5, mr * 0.26)
         dcl = CLR_DICT_HL if it.get("_dict_hl") else CLR_DICT
-        # 不写 fill：留空才像镜子，填满了就跟旁边的星打架
-        id_oval = c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
-                                outline=dcl, width=lw, tags=("hoverui",))
-        id_hand = c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
-                                ccx + cr * 0.707 + mr * 0.62,
-                                ccy + cr * 0.707 + mr * 0.62,
-                                fill=dcl, width=lw * 1.25, capstyle="round",
-                                tags=("hoverui",))
-        try:
-            gb = c.bbox(id_oval, id_hand)
-            if gb:
-                c.move(id_oval, dcx - (gb[0] + gb[2]) / 2.0,
-                       cy - (gb[1] + gb[3]) / 2.0)
-                c.move(id_hand, dcx - (gb[0] + gb[2]) / 2.0,
-                       cy - (gb[1] + gb[3]) / 2.0)
-        except Exception:
-            pass
-        # 命中框按**整块图标**算，不按线条：镜片中间那一大片空当也是该有反应的地方，
-        # 只判线条的话鼠标落在正中间反而不算点中。
-        it["_dict_box"] = (dcx - mr - 3, cy - mr - 3, dcx + mr + 3, cy + mr + 3)
-        # 收藏星：一律实心。空心星看着更雅，但中间的可点区域是空的 ——
-        # 抠洞像素会把点击漏给桌面，所以宁可用实心保证"点了就有反应"。
+        # ⚠️ 镜片里**必须填上底色**，不能留空当。灰棋盘是这个框的填充方式，
+        # 漏空的像素会被色键抠掉 —— 而抠掉的像素鼠标会**穿透**，点击根本到不了
+        # 我们手上。实测（`_debug\_holecheck.py` 逐像素扫镜片内部）：颜色是 #262626
+        # 的点全都能点中，漏成桌面的点全部没反应，一一对应。留空 = "点圆心有一半
+        # 概率没反应"，正是宇反馈的那个现象。
+        dids = [c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
+                              fill=CLR_HOVER_BG, outline=dcl, width=lw,
+                              tags=("hoverui",)),
+                c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
+                              ccx + cr * 0.707 + mr * 0.62,
+                              ccy + cr * 0.707 + mr * 0.62,
+                              fill=dcl, width=lw * 1.25, capstyle="round",
+                              tags=("hoverui",))]
+        # 命中框取整块图标的墨迹 —— **镜片圆圈内部**因此在判定区里（宇专门提过），
+        # 不用为"这里是个空当"再补什么。
+        it["_dict_box"] = self._icon_box(dids, ic["dict"], cy, mr)
+
+        # —— 收藏星：实心 ——
+        # 空心星笔画之外什么都没有，看着发飘、也容易被误读成"没选中"；实心还能让
+        # 「已收藏/未收藏」只靠颜色就分得开。
+        # 顺带一提：实心也是**点得着**的前提 —— 空心处那些没画上东西的像素会被
+        # 色键抠掉，鼠标在那儿会穿透（同镜片，见上面那段说明）。
         fav = bool(it.get("_fav"))
-        c.create_polygon(self._star_pts(scx, cy, sr),
-                         fill=CLR_STAR_ON if fav else CLR_STAR_OFF,
-                         outline=CLR_STAR_ON_BR if fav else CLR_STAR_OFF_BR,
-                         width=max(1, int(sr * 0.20)), tags=("hoverui",))
-        it["_star_box"] = (scx - sr - 3, cy - sr - 3, scx + sr + 3, cy + sr + 3)
+        stids = [c.create_polygon(self._star_pts(ic["star"], cy, sr),
+                                  fill=CLR_STAR_ON if fav else CLR_STAR_OFF,
+                                  outline=CLR_STAR_ON_BR if fav else CLR_STAR_OFF_BR,
+                                  width=max(1, int(sr * 0.20)), tags=("hoverui",))]
+        it["_star_box"] = self._icon_box(stids, ic["star"], cy, sr)
+
         it["_hitbox"] = (bx0 - 6, top - 6, bx1 + 6, bot + 6)
 
     def _redraw_hover(self, it):
@@ -2050,17 +2260,39 @@ class DanmakuLayer(object):
         except Exception:
             return False
 
-    def _dict_unhighlight(self, it):
-        """放大镜那一下高亮收回来（那时这条说不定已经飘走 / 被删了，全都得兜住）。"""
-        if not it.get("_dict_hl"):
+    def _play_word(self, it):
+        """点喇叭 → 放这一条的读音。没抓到音频的词就静默，不算错误。"""
+        w = ((it.get("word") or {}).get("word") or "").strip()
+        path = audio_path_for(w)
+        if not path:
+            return False
+        try:
+            return self._audio.play(path)
+        except Exception:
+            log_event("放读音失败：%s" % path)
+            return False
+
+    def _flash(self, it, key):
+        """图标按下先亮 220ms：出声/开浏览器都有半拍延迟，不闪一下像没点到。"""
+        it[key] = True
+        self._redraw_hover(it)
+        self.win.after(220, lambda t=it: self._unflash(t, key))
+
+    def _unflash(self, it, key):
+        """高亮收回来（那时这条说不定已经飘走 / 被删了，全都得兜住）。"""
+        if not it.get(key):
             return
-        it.pop("_dict_hl", None)
+        it.pop(key, None)
         if self._hover is it:
             self._redraw_hover(it)
 
+    @staticmethod
+    def _in_box(box, x, y):
+        return bool(box) and box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
     def _on_canvas_click(self, e):
         """
-        信息行右侧两个图标：放大镜 = 查词，★ = 收藏 / 取消收藏。
+        信息行右侧三个图标：喇叭 = 读音，放大镜 = 查词，★ = 收藏 / 取消收藏。
         （只有可交互模式下才收得到点击；悬停靠定时轮询光标，不用 <Motion>）
         """
         if not self.interactive:
@@ -2068,16 +2300,16 @@ class DanmakuLayer(object):
         it = self._hover if self._hover is not None else self._item_at_cursor()
         if it is None:
             return
-        # 放大镜先判、也单独往上提：它不依赖收藏功能能不能用
-        db = it.get("_dict_box")
-        if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
-            if self._open_dict(it):
-                it["_dict_hl"] = True
-                self._redraw_hover(it)
-                self.win.after(220, lambda t=it: self._dict_unhighlight(t))
+        # 三个判定框互不重叠（图标之间留了 igap≥8，各自外扩 3px 也不会碰上）
+        if self._in_box(it.get("_sound_box"), e.x, e.y):
+            if self._play_word(it):
+                self._flash(it, "_sound_hl")
             return
-        sb = it.get("_star_box")
-        if not sb or not (sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]):
+        if self._in_box(it.get("_dict_box"), e.x, e.y):
+            if self._open_dict(it):
+                self._flash(it, "_dict_hl")
+            return
+        if not self._in_box(it.get("_star_box"), e.x, e.y):
             return
         if not self.fav_toggle:
             return
@@ -2099,6 +2331,7 @@ class DanmakuLayer(object):
 
     def destroy(self):
         self._stop_hover_poll()
+        self._audio.close()        # 正在放音时关窗：不 close 会留一个 MCI 句柄
         try:
             self.win.destroy()
         except Exception:
