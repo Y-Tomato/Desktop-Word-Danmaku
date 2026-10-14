@@ -455,55 +455,47 @@ class AudioLookupTest(unittest.TestCase):
 
 class HoverIconLayoutTest(unittest.TestCase):
     """
-    信息行右端「喇叭 · 放大镜 · 星」的坐标。
+    信息行「音标 → 喇叭 · 放大镜 · 星」的坐标。
 
     这些数字以前是**两套**各写一遍的算式（框要撑多宽 / 图标画在哪），一旦对不上
     就是图标静悄悄跑到框外。下面几条断言专门盯这类漂移。
     """
 
-    SR, MR, HR, IGAP, IPAD, GAP = 20, 18, 20, 14, 40, 20
+    SR, MR, HR, IGAP, IPAD, TGAP = 20, 18, 20, 14, 40, 14
 
-    def _lay(self, bx1=1000.0):
-        return danmaku.hover_icons(bx1, self.IPAD, self.GAP,
-                                   self.SR, self.MR, self.HR, self.IGAP)
+    def _lay(self, ax=100.0):
+        return danmaku.hover_icons(ax, self.SR, self.MR, self.HR, self.IGAP)
 
     def test_left_to_right_order(self):
         ic = self._lay()
         self.assertLess(ic["sound"], ic["dict"])
         self.assertLess(ic["dict"], ic["star"])
 
+    def test_speaker_left_edge_sits_on_the_anchor(self):
+        """喇叭的**左沿**正好落在 ax 上 —— ax 由音标宽度算出来，所以它贴着音标。"""
+        ax = 123.0
+        self.assertAlmostEqual(self._lay(ax)["sound"] - self.HR, ax)
+
+    def test_speaker_follows_the_phonetic(self):
+        """
+        宇 2026-10-14 指出的那条：喇叭以前钉在**框的右端**，跟音标中间空出一大截，
+        看着跟"查词 / 收藏"才是一组。现在它跟着音标走 —— 音标越宽，喇叭越往右。
+        """
+        a = self._lay(100.0)
+        b = self._lay(180.0)
+        self.assertAlmostEqual(b["sound"] - a["sound"], 80.0)
+        self.assertAlmostEqual(b["star"] - a["star"], 80.0)
+
     def test_icon_gaps_match_the_constants(self):
         ic = self._lay()
-        # 喇叭归音标那一组：音标↔喇叭是 igap（贴紧），喇叭↔放大镜才是 gap（分组）
-        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.GAP + self.MR)
+        self.assertAlmostEqual(ic["dict"] - ic["sound"], self.HR + self.IGAP + self.MR)
         self.assertAlmostEqual(ic["star"] - ic["dict"], self.MR + self.IGAP + self.SR)
-        self.assertAlmostEqual(ic["sound"] - ic["txt_r"], self.HR + self.IGAP)
 
-    def test_star_sits_at_the_right_padding(self):
-        ic = self._lay(1000.0)
-        self.assertAlmostEqual(ic["star"] + self.SR, 1000.0 - self.IPAD)
-
-    def test_back_is_just_wide_enough(self):
-        """
-        把框撑到 `ipad + 音标宽 + back` 之后，音标得到的可用宽度内**正好**装得下
-        那么宽的音标 —— 这就是"框变宽但图标没跟着挪"那类漂移的守门断言。
-        """
-        bx0, acc_w = 0.0, 120.0
-        need = self.IPAD + acc_w + self._lay()["back"]
-        ic = danmaku.hover_icons(bx0 + need, self.IPAD, self.GAP,
-                                 self.SR, self.MR, self.HR, self.IGAP)
-        self.assertAlmostEqual(ic["txt_r"] - (bx0 + self.IPAD), acc_w)
-        self.assertGreater(ic["txt_r"], bx0)
-
-    def test_every_icon_stays_inside_the_box(self):
-        bx0, acc_w = 0.0, 120.0
-        need = self.IPAD + acc_w + self._lay()["back"]
-        bx1 = bx0 + need
-        ic = danmaku.hover_icons(bx1, self.IPAD, self.GAP,
-                                 self.SR, self.MR, self.HR, self.IGAP)
-        for key, r in (("sound", self.HR), ("dict", self.MR), ("star", self.SR)):
-            self.assertGreaterEqual(ic[key] - r, bx0, "%s 跑到框左边外面了" % key)
-            self.assertLessEqual(ic[key] + r, bx1, "%s 跑到框右边外面了" % key)
+    def test_run_is_the_whole_group(self):
+        """run = 从喇叭左沿到星右沿的总宽；调用方拿它反推音标还能画多宽。"""
+        ax = 100.0
+        ic = self._lay(ax)
+        self.assertAlmostEqual(ic["star"] + self.SR - ax, ic["run"])
 
     def test_hit_boxes_do_not_overlap(self):
         """
@@ -528,7 +520,9 @@ class HoverIconLayoutTest(unittest.TestCase):
         镜片**圆圈内部**必须在放大镜命中框里（宇专门提过这条）。
 
         判定框取的是"画出来的墨迹"而不是推出来的尺寸，所以这条只能连真画布一起验：
-        空心的圆里那一片空当也得算在判定区里。
+        空心的圆里那一片空当也得算在判定区里。注意"在框里"只解决一半问题 ——
+        镜片现在不填色，那儿的像素鼠标会穿透，窗口收不到点击，靠 `_click_poll`
+        的全局左键兜底补（见 `_debug\\_hotprobe.py`）。
         """
         try:
             root = danmaku.tk.Tk()
@@ -540,7 +534,7 @@ class HoverIconLayoutTest(unittest.TestCase):
             layer = danmaku.DanmakuLayer(root, cfg, 1200, 800, danmaku.FONTS)
             layer.canvas.delete("all")
             sr, mr, hr = 20, 18, 20
-            ic = danmaku.hover_icons(900.0, 30, 20, sr, mr, hr, 14)
+            ic = danmaku.hover_icons(880.0, sr, mr, hr, 14)
             c = layer.canvas
             dids = [c.create_oval(ic["dict"] - 11, 49, ic["dict"] + 11, 71,
                                   outline="#fff", width=5),
@@ -556,7 +550,6 @@ class HoverIconLayoutTest(unittest.TestCase):
                 root.destroy()
             except Exception:
                 pass
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

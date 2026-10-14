@@ -52,6 +52,10 @@ FONT_DIR = os.path.join(APP_DIR, "fonts")
 
 # 大写锁定：开着的时候弹幕层不再鼠标穿透，可以悬停看音标、点放大镜查词、点星收藏
 VK_CAPITAL = 0x14
+# 鼠标左键：色键抠掉的像素鼠标会**穿透**，窗口收不到那儿的点击（镜片圆圈内部就是
+# 这么一块）。所以除了窗口原生的 <Button-1>，还要自己查一眼左键状态兜底，
+# 见 DanmakuLayer._click_poll。
+VK_LBUTTON = 0x01
 # 全局热键用到的虚拟键码（Ctrl+Alt+H / P / Q）
 VK_H = 0x48
 VK_P = 0x50
@@ -62,6 +66,9 @@ HOTKEY_POLL_MS = 120      # 主线程取全局热键动作的周期（毫秒）
 TICK_MS = 8               # 有东西在动时的动画周期（毫秒）
 IDLE_TICK_MS = 120        # 屏上没有会动的东西时的周期（毫秒），见 DanmakuApp._tick
 SOUND_POLL_MS = 150       # 读音还在不在放的检查周期（毫秒），见 DanmakuLayer._lit_sound
+CLICK_POLL_MS = 40        # 全局左键兜底的轮询周期（毫秒），见 DanmakuLayer._click_poll
+CLICK_DEDUP_S = 0.25      # 同一物理点击的去重窗口（秒）：窗口原生收过的那一下，
+                          # 兜底得忍住别再走一遍
 
 # 新弹幕的入场点（spawn 里 x = sw + 10）与两条弹幕之间要留的最小水平空隙
 ENTER_X_PAD = 10
@@ -154,12 +161,16 @@ CLR_STAR_OFF_BR = "#7A7A7A"
 # 靠形状区分就够了（一个实心星、一个线稿镜片），再换个颜色反而显得没整理。
 CLR_DICT       = "#E9E9E9"
 CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
-# ⚠️ 镜片**必须填实色**：色键抠掉的像素不参与命中，镂空的圆心鼠标点不中
-#（逐像素实测过，见 README 坑 3）。所以要"像玻璃"只能换颜色，不能留空。
-CLR_LENS       = "#9FD8F5"  # 镜面：浅蓝，让它在深灰信息框上看着像块真镜片
+# 镜片**不填色** —— 留空才像块真玻璃（宇要的"透明镜面"，2026-10-14）。
+# 代价写清楚：镜片圆圈内部那些漏成桌面的像素鼠标会**穿透**，窗口根本收不到那儿的
+# 点击，命中框算得再准也没用 —— 补它的是 _click_poll 的全局左键兜底。
 # 喇叭（读音）图标：和放大镜同档浅灰，三个图标同级、靠形状区分
 CLR_SOUND      = "#E9E9E9"
 CLR_SOUND_HL   = "#FFC53D"  # 出声也有起播延迟（MCI open + 解码），同样先亮一下
+# 鼠标压到哪块图标上，就把它**放大 + 提亮**（宇要的"悬停要有反应"）。
+# 只提亮不够看：常态本来就是 #E9E9E9，跟纯白差得太近，所以两样一起给。
+CLR_ICON_HOT   = "#FFFFFF"
+ICON_HOT       = 1.12
 
 # 点放大镜要跳的查词页（{w} 是转义后的单词）
 DICT_URL = "https://dict.youdao.com/result?word={w}&lang=en"
@@ -1294,27 +1305,34 @@ def text_cache_key(book_path, word, cfg):
 
 # ------------------------------------------------------------ 悬停信息行布局
 
-def hover_icons(bx1, ipad, gap, sr, mr, hr, igap):
+def icon_run_width(sr, mr, hr, igap):
+    """三个图标从喇叭**左沿**到星**右沿**的总宽（与起点无关）。"""
+    return igap * 2 + hr * 2 + mr * 2 + sr * 2
+
+
+def hover_icons(ax, sr, mr, hr, igap):
     """
-    信息行右端三个图标的横向位置：从左到右 **喇叭 · 放大镜 · 星**。
+    信息行三个图标的横向中心：从左到右 **喇叭 · 放大镜 · 星**。
+
+    ax 是**喇叭图标左沿**该落在的 x —— 由音标墨迹的右缘 + 一小段空隙算出来
+    （见 `_draw_hover`），于是喇叭永远贴着音标。以前这三个是钉在**框的右端**、
+    音标在左端，中间空出一大截：看着就像"喇叭跟放大镜是一组、跟音标没关系"
+    （宇 2026-10-14 指出来就是这个）。
 
     抽成纯函数是为了能单测。以前 `need`（框要撑多宽）和三个中心点是**两套**各写
     一遍的算式，一旦对不上就是"框变宽了但图标还按老位置画"——图标被画到框外，
     不报错、只是看着别扭，靠肉眼很难发现。现在两边都从这一份坐标推出来。
 
-    喇叭和音标是一组（都跟发音有关）、放大镜和星是另一组，所以音标 ↔ 喇叭用
-    igap 贴紧、喇叭 ↔ 放大镜才用 gap 拉开 —— 一眼看得出是「音标 🔊 | 🔍 ★」。
-    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向）、音标可用的右界
-    txt_r、以及 `back`
-    ——「从框右沿退回音标右界」的宽度，调用方用它算框至少要撑多宽。
+    返回 dict：三个中心 x（y 由调用方自己给，这里只管横向），以及 `run`
+    —— 这一组从 ax 到最右沿占多宽，调用方用它反推"音标最多还能画多宽"、
+    "框至少要撑多宽"。
     """
-    star_cx = bx1 - ipad - sr
-    dict_cx = star_cx - sr - igap - mr
-    snd_cx = dict_cx - mr - gap - hr
+    snd_cx = ax + hr
+    dict_cx = snd_cx + hr + igap + mr
+    star_cx = dict_cx + mr + igap + sr
     return {
         "sound": snd_cx, "dict": dict_cx, "star": star_cx,
-        "txt_r": snd_cx - hr - igap,
-        "back": ipad + sr * 2 + igap + mr * 2 + gap + hr * 2 + igap,
+        "run": icon_run_width(sr, mr, hr, igap),
     }
 
 
@@ -1366,6 +1384,13 @@ class DanmakuLayer(object):
         self._sound_it = None    # 当前亮着喇叭的那一条（换词了要先把旧的灭掉）
         self._hover = None        # 当前被悬停、已冻结的那一条
         self._hover_job = None
+        self._icon_hot = None     # 光标正压着哪个图标（"sound"/"dict"/"star"），
+                                  # 换了目标就重画一次信息框给它放大提亮
+        self._click_job = None    # 全局左键兜底的轮询（见 _click_poll）
+        self._btn_down = False    # 上一次看到的左键状态：只在"按下沿"触发一次
+        self._pending_press = None  # 兜底看到的"按下沿"：先攒一拍，等原生先接
+        self._last_click = 0.0    # 最近一次点击生效的时刻（原生或兜底都有份）
+        self._last_click_xy = None  # 最近一次点击的坐标：判断是不是"同一下"
         self._seq = 0
         self._last_t = time.perf_counter()
         self._acc = 0.0       # 亚像素余量，保证每次只按整数像素移动
@@ -1426,8 +1451,10 @@ class DanmakuLayer(object):
         self.interactive = enabled
         if enabled:
             self._start_hover_poll()   # 穿透态下没必要轮询光标（见 _hover_poll）
+            self._start_click_poll()   # 同理：兜底点击也只有可交互时才有意义
         else:
             self._stop_hover_poll()
+            self._stop_click_poll()
             self._set_hover(None)      # 退出交互态：解冻并收起信息框
         self.refresh_layered()
 
@@ -1752,6 +1779,13 @@ class DanmakuLayer(object):
             it = self._item_at_cursor()
             if it is not self._hover:
                 self._set_hover(it)
+            elif it is not None:
+                # 光标压在哪块图标上 → 那一块放大提亮（宇要的悬停反馈）。
+                # 只在**换了目标**时重画：每 90ms 无脑重画一次纯属白烧 CPU。
+                hot = self._icon_at_cursor(it)
+                if hot != self._icon_hot:
+                    self._icon_hot = hot
+                    self._redraw_hover(it)
         except Exception:
             pass
         try:
@@ -1764,14 +1798,32 @@ class DanmakuLayer(object):
         return bool(bb) and (bb[0] - pad <= cx <= bb[2] + pad
                              and bb[1] - pad <= cy <= bb[3] + pad)
 
-    def _item_at_cursor(self):
-        """光标（画布坐标）压在哪条弹幕上；没有就 None。"""
+    def _cursor_xy(self):
+        """光标在**画布**坐标里的位置；窗口已经没了就 None。"""
         try:
             px, py = self.win.winfo_pointerxy()
-            cx = px - self.win.winfo_rootx()
-            cy = py - self.win.winfo_rooty()
+            return (px - self.win.winfo_rootx(), py - self.win.winfo_rooty())
         except Exception:
             return None
+
+    def _icon_at_cursor(self, it):
+        """光标此刻压着哪个图标（"sound"/"dict"/"star"）；没压着就 None。"""
+        xy = self._cursor_xy()
+        if xy is None:
+            return None
+        cx, cy = xy
+        # 判定框取自画出来的墨迹，镜片圆圈内部也算在里面 —— 跟点击判定同一套框
+        for k in ("sound", "dict", "star"):
+            if self._in_box(it.get("_" + k + "_box"), cx, cy):
+                return k
+        return None
+
+    def _item_at_cursor(self):
+        """光标（画布坐标）压在哪条弹幕上；没有就 None。"""
+        xy = self._cursor_xy()
+        if xy is None:
+            return None
+        cx, cy = xy
         if cx < -6 or cy < -6 or cx > self.sw + 6 or cy > self.band_h + 6:
             return None
         # 已在悬停的那条**优先判定**，而且两步都走：
@@ -1797,6 +1849,7 @@ class DanmakuLayer(object):
         if old is not None and old is not it:
             self._unfreeze(old)      # 可能转成 waiting：原地排队等挡路的过去
         self._hover = it
+        self._icon_hot = None     # 换了一条（或收起），悬停高亮跟着清掉
         try:
             self.canvas.delete("hoverui")
         except Exception:
@@ -2076,9 +2129,10 @@ class DanmakuLayer(object):
         地方"（最典型的就是放大镜镜片**圆圈内部**）天然算在判定区里，以后图标
         形状怎么改都不用同步改命中框。挪正失败就退回按尺寸估的方框。
 
-        （顺带记一笔：镜面内部是能被点中的 —— 色键抠掉的像素属于**绘制**，
-        不影响鼠标命中，别照"空心就点不着"的老结论去改设计。`_debug\\_clickprobe.py`
-        发真实左键验过。）
+        （⚠️ 别指望"命中框里有它"就等于"点得着"：镜片内部**不填色**，那些漏成
+        桌面的像素鼠标会**穿透**，窗口根本收不到那儿的点击。补它的是 `_click_poll`
+        的全局左键兜底。`_debug\\_holecheck.py` 逐像素扫过：画过的像素全点得中、
+        漏出桌面的一律没反应，一一对应。）
         """
         bb = self._recenter(ids, cx, cy)
         if bb:
@@ -2110,7 +2164,6 @@ class DanmakuLayer(object):
         fp = self._font_px()
         pad = max(10, int(fp * 0.34))          # 框与弹幕文字之间的外留白
         ipad = pad + max(6, int(fp * 0.22))    # 信息行内容再往里收一档，别贴边
-        gap = max(10, int(fp * 0.30))          # 音标与星星之间也要留口气
         row_h = max(22, int(fp * 0.82))
         # 竖直留白要按**墨迹**算：字体行盒（bbox）上下各有一截"字体自己留的白"，
         # 直接拿 bbox 当下沿 → 信息行会贴着框底、看着比上面挤。
@@ -2153,24 +2206,41 @@ class DanmakuLayer(object):
         # **误报**（ə ɜ ɪ ˈ ː 全判成缺），一拆就混进 Segoe UI，两段字距肉眼可见地不齐。
         # 而雅黑本身这些 IPA 符号一个不缺（`_debug\\_fonttest.py` 渲染对照过）。
         phf = self._font(PHON_FACE_FALLBACK or PHON_FACE, fpx, False)
-        sr = max(8, int(fp * 0.32))       # ★
-        mr = max(7, int(fp * 0.30))       # 放大镜：比星略小一号，让 ★ 还是主角
-        hr = max(8, int(fp * 0.32))       # 喇叭
-        igap = max(8, int(fp * 0.22))     # 两个**图标**之间挨得近一点，
-                                          # 音标 ↔ 图标那一段用 gap，一眼看得出是两组
+        # 三个图标统一到**同一个墨迹高度** ih（宇提的：星比喇叭/放大镜高一截）。
+        # 半径不能直接取等 —— 三块形状的"高"跟半径不是一回事，系数都是实拍标定的
+        # （`_debug\_iconprobe.py` 会把三个图标的墨迹框量出来）：
+        #   喇叭 1.52×hr：声波弧比锥体长得高，"高"是那道弧的高
+        #   放大镜 2.00×mr：45° 斜手柄比镜片探得更低
+        #   星 2.09×sr：尖角的 miter 接缝又把墨迹撑出去一截（纯几何只有 1.81×）
+        # 动了哪个图标的形状就得重新标一次；`_iconprobe.py` 里"三个图标一样高"
+        # 那条断言就是盯它的。
+        ih = max(12, int(fp * 0.55))
+        sr = max(7, int(ih / 2.09))       # ★
+        mr = max(7, int(ih / 2.00))       # 放大镜
+        hr = max(8, int(ih / 1.52))       # 喇叭
+        igap = max(8, int(fp * 0.22))     # 两个**图标**之间的空隙
+        tgap = max(8, int(fp * 0.20))     # 音标 ↔ 喇叭：喇叭要贴着音标
 
         # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下。
-        # 这里的 back（右侧图标组总共占多宽）和下面三个中心点都出自同一个
-        # hover_icons()：以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，
-        # 一旦对不上就是框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
-        # back 与 bx1 无关，所以先用当前 bx1 要一次宽度、撑完框再要一次位置。
-        need = (ipad + (phf.measure(acc) if acc else 0)
-                + hover_icons(bx1, ipad, gap, sr, mr, hr, igap)["back"])
+        # run（图标组一共占多宽）和下面三个中心点都出自同一个 hover_icons()：
+        # 以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，一旦对不上就是
+        # 框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
+        run = icon_run_width(sr, mr, hr, igap)
+        need = ipad + (phf.measure(acc) if acc else 0) + tgap + run + ipad
         if bx1 - bx0 < need:
             bx1 = bx0 + need
         bx1 = min(bx1, float(self.sw - 2))
         bx0 = max(0.0, min(bx0, bx1 - 40))
-        ic = hover_icons(bx1, ipad, gap, sr, mr, hr, igap)
+        txt_l = bx0 + ipad
+        # 音标最多能画多宽：从内容左端，到"图标组左沿再往左退 tgap"
+        seg = self._fit(phf, acc, bx1 - ipad - run - tgap - txt_l)
+        # 喇叭左沿 = 音标**实际**画完之后的右缘 + tgap。位置由音标自己的宽度决定，
+        # 所以喇叭永远贴着音标走，不管框被撑到多宽。
+        # 末尾那个 min 是保险：_fit 在极端窄的框里会整段吐回来（它有 max_w<=8 的
+        # 早退），那时硬排会把图标顶出框外，宁可让喇叭压一点音标。
+        snd_ax = txt_l + (phf.measure(seg) if seg else 0) + tgap
+        snd_ax = min(snd_ax, bx1 - ipad - run)
+        ic = hover_icons(snd_ax, sr, mr, hr, igap)
 
         box = self._round_rect(bx0, top, bx1, bot, max(6, int(fp * 0.22)),
                                fill=CLR_HOVER_BG, stipple="gray50",
@@ -2184,57 +2254,61 @@ class DanmakuLayer(object):
         except Exception:
             pass
 
-        # 右端依次是「喇叭 放大镜 ★」，位置全部由 ic 给出（不再各算一遍）
-        txt_l = bx0 + ipad
         # 光学修正：anchor="w" 是把**字体行盒**按 cy 居中，而音标的墨迹（x 高区
         # 加上 / 和 p 的下伸）整体偏下，实测比行盒中心低约 0.15em。不修的话
-        # 音标看着比右边的星低半个笔画。图标是几何图形，它们就在 cy 上。
+        # 音标看着比右边的图标低半个笔画。图标是几何图形，它们就在 cy 上。
         ty = cy - fpx * 0.15
-        if acc and ic["txt_r"] > txt_l:
+        if seg:
             # 不描边、不打暗影：描边会把 IPA 符号糊成一坨，暗影又像"带边框"
-            seg = self._fit(phf, acc, ic["txt_r"] - txt_l)
-            if seg:
-                c.create_text(txt_l, ty, text=seg, anchor="w", fill=CLR_HOVER_TEXT,
-                              font=phf, tags=("hoverui",))
+            c.create_text(txt_l, ty, text=seg, anchor="w", fill=CLR_HOVER_TEXT,
+                          font=phf, tags=("hoverui",))
+
+        # 鼠标压在哪一块图标上（宇要的"悬停要有反应"）：那一块放大一档 + 提亮。
+        # 只放大不改色的话，线稿的放大镜其实不太看得出来；只改色又离 #E9E9E9
+        # 太近。两个一起给，指哪亮哪。
+        hot = self._icon_hot
 
         # —— 喇叭（读音）：实心喇叭 + 两道声波弧 ——
-        scl = CLR_SOUND_HL if it.get("_sound_hl") else CLR_SOUND
-        sids = [c.create_polygon(speaker_pts(ic["sound"], cy, hr), fill=scl,
+        hs = hr * (ICON_HOT if hot == "sound" else 1.0)
+        scl = CLR_SOUND_HL if it.get("_sound_hl") else (
+            CLR_ICON_HOT if hot == "sound" else CLR_SOUND)
+        sids = [c.create_polygon(speaker_pts(ic["sound"], cy, hs), fill=scl,
                                  outline="", tags=("hoverui",))]
         # 声波弧：Tk 的角度自 3 点钟起、逆时针为正，所以 -52°~+52° 正好是椭圆
         # 靠右的那一段（看着才是朝右扩散的声波，而不是两个括号）
         for k in (0.45, 0.80):
-            r = hr * k
-            ax = ic["sound"] + hr * 0.12
+            r = hs * k
+            ax = ic["sound"] + hs * 0.12
             sids.append(c.create_arc(ax - r, cy - r, ax + r, cy + r,
                                      start=-52, extent=104, style="arc",
-                                     outline=scl, width=max(1.0, hr * 0.20),
+                                     outline=scl, width=max(1.0, hs * 0.20),
                                      tags=("hoverui",)))
-        it["_sound_box"] = self._icon_box(sids, ic["sound"], cy, hr)
+        it["_sound_box"] = self._icon_box(sids, ic["sound"], cy, hs)
 
         # —— 放大镜（查词）：镜片 + 45° 手柄的线稿 ——
         # 镜片圆心先按 -0.219·r 往左上估个位置，真正居中交给 _icon_box 里的
         # "按墨迹挪正" —— 推出来的值实测会偏右下 2px 多。
-        cr = mr * 0.62
-        ccx, ccy = ic["dict"] - mr * 0.219, cy - mr * 0.219
-        lw = max(1.5, mr * 0.26)
-        dcl = CLR_DICT_HL if it.get("_dict_hl") else CLR_DICT
-        # ⚠️ 镜片里**必须填上实色**，不能留空当。灰棋盘是这个框的填充方式，
-        # 漏空的像素会被色键抠掉 —— 而抠掉的像素鼠标会**穿透**，点击根本到不了
-        # 我们手上。实测（`_debug\_holecheck.py` 逐像素扫镜片内部）：颜色是 #262626
-        # 的点全都能点中，漏成桌面的点全部没反应，一一对应。留空 = "点圆心有一半
-        # 概率没反应"，正是宇反馈的那个现象。
+        ms = mr * (ICON_HOT if hot == "dict" else 1.0)
+        cr = ms * 0.62
+        ccx, ccy = ic["dict"] - ms * 0.219, cy - ms * 0.219
+        lw = max(1.5, ms * 0.26)
+        dcl = CLR_DICT_HL if it.get("_dict_hl") else (
+            CLR_ICON_HOT if hot == "dict" else CLR_DICT)
+        # ⚠️ 镜片**故意不填色**：留空才像真玻璃（宇 2026-10-14 要的"透明镜面"）。
+        # 代价是圆圈内部那些漏成桌面的像素会被色键抠掉、鼠标在那儿**穿透**，
+        # 窗口收不到点击（`_debug\_holecheck.py` 逐像素量过：画过的像素全点得中，
+        # 漏成桌面的一个都点不中）。补它的不是 fill，是 `_click_poll` 的全局左键
+        # 兜底 —— 所以别看到"空心点不着"就把 fill 填回去。
         dids = [c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
-                              fill=CLR_LENS, outline=dcl, width=lw,
-                              tags=("hoverui",)),
+                              outline=dcl, width=lw, tags=("hoverui",)),
                 c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
-                              ccx + cr * 0.707 + mr * 0.62,
-                              ccy + cr * 0.707 + mr * 0.62,
+                              ccx + cr * 0.707 + ms * 0.62,
+                              ccy + cr * 0.707 + ms * 0.62,
                               fill=dcl, width=lw * 1.25, capstyle="round",
                               tags=("hoverui",))]
         # 命中框取整块图标的墨迹 —— **镜片圆圈内部**因此在判定区里（宇专门提过），
         # 不用为"这里是个空当"再补什么。
-        it["_dict_box"] = self._icon_box(dids, ic["dict"], cy, mr)
+        it["_dict_box"] = self._icon_box(dids, ic["dict"], cy, ms)
 
         # —— 收藏星：实心 ——
         # 空心星笔画之外什么都没有，看着发飘、也容易被误读成"没选中"；实心还能让
@@ -2242,11 +2316,14 @@ class DanmakuLayer(object):
         # 顺带一提：实心也是**点得着**的前提 —— 空心处那些没画上东西的像素会被
         # 色键抠掉，鼠标在那儿会穿透（同镜片，见上面那段说明）。
         fav = bool(it.get("_fav"))
-        stids = [c.create_polygon(self._star_pts(ic["star"], cy, sr),
+        # 星悬停时**只放大、不换色** —— 它的颜色已经被"收藏了没有"占着，
+        # 再拿颜色当悬停态就跟收藏态撞车了。
+        ss = sr * (ICON_HOT if hot == "star" else 1.0)
+        stids = [c.create_polygon(self._star_pts(ic["star"], cy, ss),
                                   fill=CLR_STAR_ON if fav else CLR_STAR_OFF,
                                   outline=CLR_STAR_ON_BR if fav else CLR_STAR_OFF_BR,
-                                  width=max(1, int(sr * 0.20)), tags=("hoverui",))]
-        it["_star_box"] = self._icon_box(stids, ic["star"], cy, sr)
+                                  width=max(1, int(ss * 0.20)), tags=("hoverui",))]
+        it["_star_box"] = self._icon_box(stids, ic["star"], cy, ss)
 
         it["_hitbox"] = (bx0 - 6, top - 6, bx1 + 6, bot + 6)
 
@@ -2364,26 +2441,25 @@ class DanmakuLayer(object):
     def _in_box(box, x, y):
         return bool(box) and box[0] <= x <= box[2] and box[1] <= y <= box[3]
 
-    def _on_canvas_click(self, e):
+    def _click_at(self, x, y):
         """
         信息行右侧三个图标：喇叭 = 读音，放大镜 = 查词，★ = 收藏 / 取消收藏。
-        （只有可交互模式下才收得到点击；悬停靠定时轮询光标，不用 <Motion>）
+
+        窗口原生收到的点击、和全局兜底捞回来的点击都走这里，行为完全一致。
         """
-        if not self.interactive:
-            return
         it = self._hover if self._hover is not None else self._item_at_cursor()
         if it is None:
             return
         # 三个判定框互不重叠（图标之间留了 igap≥8，各自外扩 3px 也不会碰上）
-        if self._in_box(it.get("_sound_box"), e.x, e.y):
+        if self._in_box(it.get("_sound_box"), x, y):
             if self._play_word(it):
                 self._lit_sound(it)
             return
-        if self._in_box(it.get("_dict_box"), e.x, e.y):
+        if self._in_box(it.get("_dict_box"), x, y):
             if self._open_dict(it):
                 self._flash(it, "_dict_hl")
             return
-        if not self._in_box(it.get("_star_box"), e.x, e.y):
+        if not self._in_box(it.get("_star_box"), x, y):
             return
         if not self.fav_toggle:
             return
@@ -2396,6 +2472,93 @@ class DanmakuLayer(object):
             return
         self._redraw_hover(it)      # 立刻把星的颜色换掉，给出即时反馈
 
+    def _on_canvas_click(self, e):
+        """窗口**真收到了**的那一半点击（悬停靠定时轮询光标，不用 <Motion>）。"""
+        if not self.interactive:
+            return
+        # 窗口既然收到，全局兜底那条路就撤单 —— 同一次物理点击只走一遍。
+        self._pending_press = None
+        # 极少数情况下兜底会抢在原生前面（Tk 消息队列卡了一下）：它点过的坐标
+        # 在这一小段时间内又来一次原生，就是同一下，别再点。
+        if time.perf_counter() - self._last_click < CLICK_DEDUP_S and \
+                self._same_click_xy(e.x, e.y):
+            return
+        self._last_click = time.perf_counter()
+        self._last_click_xy = (e.x, e.y)
+        self._click_at(e.x, e.y)
+
+    def _same_click_xy(self, x, y):
+        """是不是"同一下"—— 兜底和原生都跟的是同一个光标，坐标挨着就是。"""
+        p = self._last_click_xy
+        if p is None:
+            return False
+        return abs(p[0] - x) <= 4 and abs(p[1] - y) <= 4
+
+    def _start_click_poll(self):
+        if self._click_job is None:
+            try:
+                self._click_job = self.win.after(CLICK_POLL_MS, self._click_poll)
+            except Exception:
+                self._click_job = None
+
+    def _stop_click_poll(self):
+        if self._click_job is not None:
+            try:
+                self.win.after_cancel(self._click_job)
+            except Exception:
+                pass
+            self._click_job = None
+        self._btn_down = False
+        self._pending_press = None
+
+    def _click_poll(self):
+        """
+        **全局左键兜底**：色键抠掉的像素鼠标会穿透，窗口根本收不到那儿的点击 ——
+        镜片圆圈内部就是这么一块（宇要的"透明镜面"），再准的命中框也救不了。
+        所以除了原生 <Button-1>，再自己查一眼左键状态：光标压在某块图标框里，
+        就走和原生点击同一条路径。
+
+        去重不靠时间窗，靠"撤单"：按下沿到了先只记一笔 `_pending_press`，
+        留一拍给原生（原生收到了会在 _on_canvas_click 里把它清掉）；
+        下一拍它还挂着，说明窗口确实没收到（透明像素），这才出手。
+        `_btn_down` 保证按住不放只算一次。
+        """
+        self._click_job = None
+        if not self.interactive:
+            return          # 已切回穿透：停机，等下次开交互再启动
+        try:
+            if not self.win.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            st = int(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON)) & 0xFFFF
+        except Exception:
+            st = 0
+        down = bool(st & 0x8000)
+        fresh = down and not self._btn_down      # 按下沿
+        self._btn_down = down
+        # 低位是"上次问过之后按下过"：按得比 CLICK_POLL_MS 还快的点击只有它抓得住
+        # 低位是"上次问过之后按下过"：按得比 CLICK_POLL_MS 还快的点击只有它抓得住
+        kicked = bool(st & 0x0001)
+        if self._pending_press is not None and not fresh:
+            # 上一拍记的那笔，原生一直没来领 —— 说明窗口确实没收（透明像素），
+            # 这才出手。放在前面判，免得"按下过"的低位把这笔单又覆盖掉。
+            xy = self._pending_press
+            self._pending_press = None
+            if self._hover is not None:
+                self._click_at(xy[0], xy[1])
+                self._last_click = time.perf_counter()
+                self._last_click_xy = xy
+        elif (fresh or kicked) and self._hover is not None:
+            # 先只记一笔，不立刻点：留一拍（40ms）给原生投递。原生接到了会在
+            # _on_canvas_click 里把这笔单清掉，下一拍这儿便不再出手。
+            self._pending_press = self._cursor_xy()
+        try:
+            self._click_job = self.win.after(CLICK_POLL_MS, self._click_poll)
+        except Exception:
+            self._click_job = None
+
     def clear(self):
         self._stop_sound_poll()
         self._set_hover(None)
@@ -2407,6 +2570,7 @@ class DanmakuLayer(object):
     def destroy(self):
         self._stop_sound_poll()    # 先收灯轮询，别把 after 回调留给马上要死的窗口
         self._stop_hover_poll()
+        self._stop_click_poll()
         self._audio.close()        # 正在放音时关窗：不 close 会留一个 MCI 句柄
         try:
             self.win.destroy()
