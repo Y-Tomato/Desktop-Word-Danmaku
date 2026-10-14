@@ -136,7 +136,8 @@ logo\                 图标
 config.json           配置，首次运行生成，删掉即恢复出厂
 error.log             非致命问题的记录，出问题先看它
 tests\                单元测试
-tools\check_books.py  词书体检
+tools\                词书体检 / 读音抓取与格式归一
+audio\                单词读音 mp3（tools\fetch_audio.py 的产物，没进版本库）
 ```
 
 启动器 `.bat` 里全是 ASCII 是故意的：`cmd` 默认按 GBK 解析 `.bat`，里面写中文会变乱码，`start` 找不到文件、`pythonw` 又没有控制台，最后失败得悄无声息。
@@ -148,6 +149,13 @@ tools\check_books.py  词书体检
 ```
 python -m unittest discover -s tests     # 35 条，只用标准库
 python tools\check_books.py              # 扫一遍 books\ 下所有词书
+```
+
+单词读音是另外两个脚本的事，产物都在 `audio\` 下（一个词一个 mp3，文件名就是单词）：
+
+```
+python tools\fetch_audio.py        # 从有道抓读音（已有且合法的会跳过，可反复跑）
+python tools\normalize_audio.py    # 把抓下来的统一成同一种 mp3 格式
 ```
 
 测试盯的都是我踩过的点：词性分块（就是上面 `acquire` 那个）、释义裁剪、文案缓存的 key、配置的原子写、收藏夹 csv 往返、字体标点覆盖、GDI 位图还能不能出图、暂停用的时钟、全局热键的注册与分发。体检脚本会列出解析不出词性的词、义项里混进词性标记的词、重复词、缺音标、剥掉括号后没释义，以及长到读不完的文案。
