@@ -44,7 +44,6 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BOOKS_DIR = os.path.join(APP_DIR, "books")
 DATA_CSV = os.path.join(BOOKS_DIR, "六级核心过考版（全部·2551词）.csv")
 # 没在 config 里记过词书时优先用它。
-# 原来是"六级词汇大全（已学·152词）"，2026-10-13 宇把那本删了，默认改到核心过考版。
 DEFAULT_BOOK_NAME = os.path.basename(DATA_CSV)
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 LOG_PATH = os.path.join(APP_DIR, "error.log")   # 非致命问题也往这儿追加，别让它静默消失
@@ -90,10 +89,9 @@ ENTER_X_PAD = 10
 # 时才用得上：那时这条只能老实等人家先过去，这条上限是防止极端叠法永久卡住。
 UNFREEZE_WAIT_MAX = 8.0
 
-# —— 「加速离开」让路（2026-10-13 定，接替上面的排队等待）——
+# —— 「加速离开」让路 ——
 # 悬停结束时若有人压在它身上：被悬停那条**自己加速往左拉开距离**，
 # 压着它的那几条**原地停一步**让它先走，等它甩开了再恢复。
-# 之前那版是"让挡路的人加速冲过去"，宇看完实机否掉了；这次反过来，是他指定的。
 BOOST_MULT = 2.4     # 加速期间的倍率（正常 lane 速度的 2.4 倍）
 BOOST_MAX_SEC = 3.0  # 兜底：这么久还没甩开就恢复正常，谁也不许一直停着
 
@@ -102,7 +100,7 @@ PHON_FACE = "Microsoft YaHei"
 
 # ⚠️ 雅黑**真的缺** ə ɜ ɪ ʊ ˈ ː（GDI GetGlyphIndicesW 实测全是「无字形」，
 # Lolita / Segoe UI / Arial 都有）。音标今天能显示靠的是 Windows 的 **font linking**
-# 在逐字兜底 —— 早期注释说这是 cmap 解析器误报，反了：_ttf_codepoints 读的是事实。
+# 在逐字兜底。
 # 想不依赖它、整行换一支自带 IPA 的字体就填 "Segoe UI"；代价是 _draw_hover 里那两处
 # 按雅黑标定的竖直光学修正（0.62 / 0.41 em）要重新实拍标定，所以默认留空。
 PHON_FACE_FALLBACK = ""
@@ -144,7 +142,7 @@ PALETTE = [
 # 全部取自 logo\TomatoGirl_Logo.png 的实际像素：
 #   主红 #E64F3B / 暗红 #C93522 / 深红 #9C2010 / 浅红 #FDAA9A
 #   叶绿 #4F8527 / 深绿 #3D6A1E
-#   肤色 #FCD6BE 用来调出暖白背景，避免原来那套冷灰配色跟番茄打架。
+#   肤色 #FCD6BE 用来调出暖白背景：冷灰底跟番茄主色不搭。
 CLR_RED      = "#E64F3B"   # 番茄主红：标题、主按钮、滑轨激活
 CLR_RED_DARK = "#C93522"   # 暗红：按压态、主按钮 hover
 CLR_RED_DEEP = "#9C2010"   # 深红：强调文字
@@ -161,13 +159,12 @@ CLR_MUTED     = "#8C7A72"
 # —— 弹幕悬停信息框（悬停时才出现的那块）——
 # 底色故意压得很深：stipple 只填一半像素，另一半透出桌面，
 # 底越深，白字（尤其是没有描边的音标）压在花底上才越看得清。
-# 密度就定在 gray50（实测**正好 50% 像素填充**，`_debug\_stippleprobe.py` 有实拍统计）。
-# ⚠️ 别自作聪明换成 gray75/gray12：2026-10-13 试过 gray75（75% 填充、只漏 1/4），
-# 宇看完要求**改回 gray50** —— 他要的就是这层"能看见后面"的通透感。
+# 密度定在 gray50：实测正好 50% 像素填充。换 gray75/gray12 会改掉填充率，
+# "能看见后面"这层通透感就没了。
 CLR_HOVER_BG   = "#262626"
 CLR_HOVER_BRD  = "#EDEDED"  # 圆角描边
 CLR_HOVER_TEXT = "#FFFFFF"  # 音标字色
-# 星是**线稿**（2026-10-14 由实心改）：只描边不填色，笔宽跟放大镜一档 ——
+# 星是**线稿**：只描边不填色，笔宽跟放大镜一档 ——
 # 信息行三个图标统一成"同一支笔画出来的一套"。颜色就落在描边上：
 CLR_STAR_ON    = "#FFC53D"  # 已收藏：金黄
 CLR_STAR_OFF   = "#E9E9E9"  # 未收藏：浅灰（跟放大镜同色，同级操作靠形状区分）
@@ -175,13 +172,13 @@ CLR_STAR_OFF   = "#E9E9E9"  # 未收藏：浅灰（跟放大镜同色，同级�
 # 靠形状区分就够了（一个圆镜片、一个五角星），再换个颜色反而显得没整理。
 CLR_DICT       = "#E9E9E9"
 CLR_DICT_HL    = "#FFC53D"  # 点下去那一瞬：浏览器要过半拍才弹出来，当场给个反馈
-# 镜片**不填色** —— 留空才像块真玻璃（宇要的"透明镜面"，2026-10-14）。
+# 镜片**不填色** —— 留空才像块真玻璃。
 # 代价写清楚：镜片圆圈内部那些漏成桌面的像素鼠标会**穿透**，窗口根本收不到那儿的
 # 点击，命中框算得再准也没用 —— 补它的是 _click_poll 的全局左键兜底。
 # 喇叭（读音）图标：和放大镜同档浅灰，三个图标同级、靠形状区分
 CLR_SOUND      = "#E9E9E9"
 CLR_SOUND_HL   = "#FFC53D"  # 出声也有起播延迟（MCI open + 解码），同样先亮一下
-# 鼠标压到哪块图标上，就把它**放大 + 提亮**（宇要的"悬停要有反应"）。
+# 鼠标压到哪块图标上，就把它**放大 + 提亮**。
 # 只提亮不够看：常态本来就是 #E9E9E9，跟纯白差得太近，所以两样一起给。
 CLR_ICON_HOT   = "#FFFFFF"
 ICON_HOT       = 1.12
@@ -237,11 +234,10 @@ POS_RE = re.compile(r"^\s*([a-zA-Z]{1,6}\.)\s*(.+)$")
 # 「词性 + 后面的空白」。必须先把 1~n 个空格压成 1 个：百词斩的数据里 acquire 是
 # "v.  （通过努力、能力）获得；…" —— 词性后面跟的是**两个**空格，而双空格正好是
 # 词性块的分隔符，不压掉就会把 "v." 单独切出去、降级成一个义项
-#（弹幕上显示成 "acquire  v.；获得"）。实测：4 本词书里那一份 acquire 全中。
+#（弹幕上显示成 "acquire  v.；获得"）。
 POS_GAP_RE = re.compile(r"([a-zA-Z]{1,6}\.)\s+")
 
 # 标点不做任何替换：萝莉体对 ；，。（）：【】／｜～？！．、… — · 全部有字形
-#（早期"缺全角标点"的结论来自一次错误的 cmap 解析，把字形索引当成了字符码）。
 # 换别的字体真撞上缺字时，split_runs 的逐字回退会自动兜住。
 
 # 出现区域：内部值 -> 面板显示
@@ -285,7 +281,7 @@ def get_screen_size():
 # text item 上。实测同屏 5 条 = 45 个 text item → 58fps（帧间隔 p95 34ms），
 # 同屏 1 条 = 9 个 item → 104fps，帧率基本与 item 数成反比。
 # 改成"每条弹幕先画成一张位图、每帧只 blit 1 个 image item"后，
-# 帧率与条数脱钩，而描边质量与原来**完全一致**（同一套 8 向膨胀参数）。
+# 帧率与条数脱钩，而描边质量与逐段 text **完全一致**（同一套 8 向膨胀参数）。
 
 _GDI = ctypes.windll.gdi32
 _KEY_RGB = (1, 2, 3)          # 与 TRANSPARENT_KEY = "#010203" 同色
@@ -319,8 +315,7 @@ class _SIZE(ctypes.Structure):
 
 
 # ctypes 不声明 argtypes/restype 时，参数和返回值都按 c_int 解释 —— 64 位下句柄会被
-# 截成 32 位。GDI 句柄本来就是 32 位的表索引，所以老代码能跑，但那是"碰巧对"。
-# 这里把用到的原型钉死（wintypes 早就 import 了，一直没人用）。
+# 截成 32 位。GDI 句柄本来就是 32 位的表索引，不钉死原型迟早会出问题。
 _HGDIOBJ = ctypes.wintypes.HGDIOBJ
 _GDI.CreateCompatibleDC.argtypes = [ctypes.wintypes.HDC]
 _GDI.CreateCompatibleDC.restype = ctypes.wintypes.HDC
@@ -547,9 +542,9 @@ def log_event(msg):
     """
     把非致命问题追加写进 error.log。
 
-    以前这些地方全是裸的 except Exception: pass：config.json 被写坏、悬停框画不出来，
-    用户那边只表现为「设置莫名其妙回到默认了」，一点线索都不留。写日志本身再失败也不能
-    反过来影响主流程，所以这里自己兜住自己。
+    不记的话，config.json 被写坏、悬停框画不出来这类问题只表现为「设置莫名其妙
+    回到默认了」，一点线索都不留。写日志本身再失败也不能反过来影响主流程，
+    所以这里自己兜住自己。
     """
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -605,7 +600,7 @@ def apply_layered(hwnd, key_hex, click_through=True, alpha=255):
     手动实现「色键透明 + 鼠标穿透」。
 
     为什么不用 tkinter 的 `wm attributes -transparentcolor`？
-    实测在 Windows 上它**不生效**——窗口会糊成一块实心黑底（已用对照组验证）。
+    实测在 Windows 上它**不生效**——窗口会糊成一块实心黑底。
     必须自己调 SetLayeredWindowAttributes，并且注意：
       · COLORREF 是 0x00BBGGRR 顺序，不是 RGB，写反了颜色键就对不上；
       · 改完 WS_EX 样式后要**立刻重设** layered 属性，否则窗口可能整块不可见。
@@ -671,8 +666,8 @@ def _ttf_family_name(path):
     """
     读 name 表 id=1 拿到字体 family 名（换字体文件不用改代码）。
 
-    坑：pid=1（Macintosh）的单字节记录常排在 pid=3（Windows）前面，按 UTF-16
-    解码会把 "Lolita" 读成 "䱯汩瑡" —— 必须按 platformID 选解码方式，且优先 Windows。
+    pid=1（Macintosh）的单字节记录常排在 pid=3（Windows）前面，按 UTF-16 解码会
+    把 "Lolita" 读成 "䱯汩瑡" —— 必须按 platformID 选解码方式，且优先 Windows。
     """
     try:
         nd = _read_ttf_tables(path)["name"][2]
@@ -1035,7 +1030,7 @@ def shorten_cn(cn, max_len):
         if out:
             if len(out) + 1 + len(s) > max_len:
                 break
-            out += "；" + s          # 义项之间用中文分号（用户要求）
+            out += "；" + s          # 义项之间用中文分号
         else:
             if len(s) > max_len:
                 return s[:max_len] + "…"
@@ -1058,7 +1053,7 @@ def ensure_fav_book():
     try:
         if not os.path.isdir(BOOKS_DIR):
             os.makedirs(BOOKS_DIR)
-        # 旧版叫 favourite.csv：就地改名，别让宇已经收藏的词凭空消失
+        # 旧版叫 favourite.csv：就地改名，别让已收藏的词丢失
         old = os.path.join(BOOKS_DIR, LEGACY_FAV_NAME)
         if os.path.exists(old):
             if os.path.exists(FAV_BOOK_PATH):
@@ -1306,11 +1301,9 @@ def text_cache_key(book_path, word, cfg):
     ⚠️ 拿「词在词表里的序号」当 key 是错的：收藏夹（已收藏单词.csv）每次收藏都
     **按字母序整本重写**，正拿它当词书时收藏一个新词，后面所有序号都会平移 ——
     同一个序号指向的单词悄悄换了人，于是弹幕文字和挂在它身上的 word
-    （悬停音标 / 点星收藏用的那个）对不上。改成用单词本身 + 词书路径，
-    序号怎么变都无所谓。
+    （悬停音标 / 点星收藏用的那个）对不上。用单词本身 + 词书路径，序号怎么变都无所谓。
 
-    另外 key 必须覆盖 build_text 读的**每一个**参数：以前漏了 per_pos_meanings，
-    只因为它恰好没暴露在面板上才没出事。
+    key 还必须覆盖 build_text 读的**每一个**参数。
     """
     return (book_path, (word.get("word") or ""),
             cfg.get("max_meanings"), cfg.get("max_pos"),
@@ -1323,8 +1316,8 @@ def icon_group_widths(sr, mr, hr, igap):
     """
     两组图标各占多宽：返回 (喇叭那一组, 放大镜 + 星那一组)。
 
-    ⚠️ 别在调用方手抄 `hr * 2` / `mr * 2 + igap + sr * 2`：以前"框要撑多宽"和
-    "图标画在哪"就是两套各写一遍的算式，一对不上图标就静悄悄跑到框外。
+    别在调用方手抄 `hr * 2` / `mr * 2 + igap + sr * 2`：两处各写一遍，一旦
+    对不上图标就静悄悄跑到框外。
     """
     return hr * 2, mr * 2 + igap + sr * 2
 
@@ -1337,10 +1330,8 @@ def hover_icons(ax, rx, sr, mr, hr, igap):
     rx = 星图标**右沿**该落的 x（= 框右内沿）
     igap = 放大镜 ↔ 星之间的空隙
 
-    位置是宇 2026-10-14 拿实拍图标定的：读音算音标那一组的，喇叭要紧跟音标；
-    查词 / 收藏钉在右端不动，中间那段空白随音标长短伸缩。
-    上一版三个是连成一排、整组跟着音标走 —— 在宽框里看着仍然像"喇叭跟搜索收藏
-    挤在一起"，所以改成两头各钉一头。
+    读音算音标那一组，喇叭紧跟音标；查词 / 收藏钉在右端不动，中间那段空白
+    随音标长短伸缩。
 
     抽成纯函数是为了能单测（y 由调用方给，这里只管横向）。
     """
@@ -1435,7 +1426,7 @@ class DanmakuLayer(object):
         # 点星星收藏；悬停靠定时查光标位置，不用 <Motion>（见 _hover_poll）
         self.canvas.bind("<Button-1>", self._on_canvas_click)
         # 悬停轮询只在「可交互」（大写锁定开）时才跑：默认是穿透态，先不启动，
-        # 等 set_interactive(True) 再拉开。以前是无条件每 90ms 醒一次。
+        # 等 set_interactive(True) 再拉开。
         self._hover_job = None
 
     def refresh_layered(self):
@@ -1449,7 +1440,7 @@ class DanmakuLayer(object):
         alpha 没变、穿透态也没变就**直接返回**：拖不透明度滑块时每次改参数都重设
         layered 属性，会让整块窗口强制重绘一次，这正是拖动卡顿的来源之一。
         注意 through 也必须一起比 —— 从「穿透」切回「不穿透」时 alpha 常常恰好
-        没变，只比 alpha 的话这次切换就被跳过了，弹幕永远点不着。
+        没变，只比 alpha 的话该切换就被跳过了，弹幕永远点不着。
         """
         a = int(float(cfg_num(self.cfg, "opacity")) * 255)
         through = not self.interactive
@@ -1477,13 +1468,12 @@ class DanmakuLayer(object):
     def set_paused(self, paused):
         """
         暂停 / 继续。暂停只冻结运动与出新词，画面上的弹幕停在原地
-        （用户明确要求：暂停后不能清屏，继续时接着走）。
+        （暂停后不能清屏，继续时接着走）。
         """
         self.paused = bool(paused)
         # 重置时间基线，继续的那一帧不会瞬移。
-        # ⚠️ 必须和 tick 用同一个时钟：这里曾经写的是 time.monotonic()，
-        # 而 tick 读的是 time.perf_counter()，两者在 Windows 上基准不同
-        # （本机实测差 35ms）—— 于是每次「继续」的第一帧都会按那 35ms 多走一步。
+        # ⚠️ 必须和 tick 用同一个时钟（time.perf_counter）：monotonic 在 Windows 上
+        # 基准不同，混用会让「继续」的第一帧多走一步。
         self._last_t = time.perf_counter()
         self._acc = 0.0
 
@@ -1609,7 +1599,7 @@ class DanmakuLayer(object):
         放一条弹幕。
 
         replace_oldest=True（面板上「来一条」专用）：同屏已满或者轨道占满时，
-        先**销毁最老的那条**再放新词，而不是把这次点击悄悄丢掉。
+        先**销毁最老的那条**再放新词，而不是把这次点击丢掉。
         自动节奏仍走 replace_oldest=False —— 该跳过的拍子照旧跳过，节奏才稳定。
 
         word = 这个词的原始词条（dict）。悬停信息框要拿它的音标，
@@ -1632,7 +1622,7 @@ class DanmakuLayer(object):
         fk_main, fk_fall = (fam, font_px, False), (fall, font_px, True)
         f_main = self._font(fam, font_px)          # 走缓存，别每次 new
         f_fall = self._font(fall, font_px, True)
-        # 主字体的覆盖范围：画不出的字（如萝莉体缺全角分号）自动走回退字体
+        # 主字体的覆盖范围：画不出的字自动走回退字体
         covered = self.fonts.coverage(fam)
 
         pad = max(8, font_px // 3)  # 描边余量
@@ -1696,7 +1686,6 @@ class DanmakuLayer(object):
                                         fill=color, font=f, tags=(tag, "dm"))
                 cx += self._measure(f, fk_main if ok else fk_fall, s)
 
-        # 新建的 item 天然就在最上层，原先那句 tag_raise("dm") 纯属多余的开销
         # _img 是 PhotoImage 的**强引用**：Tk 只管画，Python 一回收图片就变空白
         self.items.append(dict(tag=tag, x=float(x), y=float(ys), w=float(total),
                                slot=slot, word=word, frozen=False, _img=img))
@@ -1796,7 +1785,7 @@ class DanmakuLayer(object):
             if it is not self._hover:
                 self._set_hover(it)
             elif it is not None:
-                # 光标压在哪块图标上 → 那一块放大提亮（宇要的悬停反馈）。
+                # 光标压在哪块图标上 → 那一块放大提亮。
                 # 只在**换了目标**时重画：每 90ms 无脑重画一次纯属白烧 CPU。
                 hot = self._icon_at_cursor(it)
                 if hot != self._icon_hot:
@@ -1873,7 +1862,7 @@ class DanmakuLayer(object):
         if it is None:
             return
         # 命中框与高亮态都是"这一轮悬停"的临时数据，换焦点就清掉，
-        # 免得下一条复用同一个 dict 时误判（之前 _star_box 就这么漏过一次）
+        # 免得下一条复用同一个 dict 时误判
         for k in ("_hitbox", "_sound_box", "_dict_box", "_star_box",
                   "_sound_hl", "_dict_hl"):
             it.pop(k, None)
@@ -1910,7 +1899,7 @@ class DanmakuLayer(object):
     def _raise_hover(self):
         """
         把「悬停信息框 + 被悬停的那一条」顶到最上层：新弹幕是后画的、天然压在上面，
-        而悬停期间同轨道允许后来者穿过，所以每放一条都得把焦点这组重新提一次。
+        而悬停期间同轨道允许后放的那条穿过，所以每放一条都得把焦点这组重新提一次。
         """
         if self._hover is None:
             return
@@ -2147,8 +2136,7 @@ class DanmakuLayer(object):
 
         （⚠️ 别指望"命中框里有它"就等于"点得着"：镜片内部**不填色**，那些漏成
         桌面的像素鼠标会**穿透**，窗口根本收不到那儿的点击。补它的是 `_click_poll`
-        的全局左键兜底。`_debug\\_holecheck.py` 逐像素扫过：画过的像素全点得中、
-        漏出桌面的一律没反应，一一对应。）
+        的全局左键兜底。）
         """
         bb = self._recenter(ids, cx, cy)
         if bb:
@@ -2196,10 +2184,8 @@ class DanmakuLayer(object):
         fpx0 = max(12, int(fp * 0.62))
         ink_top_in_row = row_h / 2.0 - 0.62 * fpx0
         # 翻到文字上方时要用「行盒顶 → 墨迹**底**」：≈ 墨迹顶 + 墨迹高（0.94em）。
-        # 这个数是从**实拍像素**里标定的（`_debug\_hovgap.py` 会把三行的墨迹间距
-        # 都量出来），别在纸上推 —— 推出来的值会让上面那行近 4px。
-        # 0.50 是在两种字号（fp≈45 / ≈74）下都量过一遍的折中值；这套坐标本身就
-        # 有 ±1~2px 的噪声下限（画布取整 + 描边抗锯齿），所以两边间距差 ≤2px 即达标。
+        # 这个数是按实拍像素标定的，别在纸上推 —— 推出来的值会让上面那行近 4px。
+        # 坐标本身有 ±1~2px 的噪声下限（画布取整 + 描边抗锯齿），两边间距差 ≤2px 即达标。
         ink_bot_in_row = row_h / 2.0 + 0.41 * fpx0
         if ink_bot + vgap + (row_h - ink_top_in_row) + vgap <= self.band_h - 2:
             # 默认：文字下方。音标墨迹顶离单词墨迹底正好 vgap
@@ -2216,27 +2202,21 @@ class DanmakuLayer(object):
         acc = (word.get("accent") or "").strip()
         fpx = fpx0                      # 音标字号（上面算行盒位置时已经取过同一个值）
         # 音标**固定微软雅黑**，不跟弹幕正文的萝莉体走 —— 萝莉体画 IPA 又细又飘。
-        # 字重用**常规**、不加粗：花底 + 小字号下粗体笔画容易糊成一团，反而难认
-        # （`_hovercheck.py` 里有断言盯着「必须是常规字重」）。
-        # 也别再按"缺字"把音标拆成多段：实测 msyh.ttc 的 cmap 会被自己的解析器
-        # **误报**（ə ɜ ɪ ˈ ː 全判成缺），一拆就混进 Segoe UI，两段字距肉眼可见地不齐。
-        # 而雅黑本身这些 IPA 符号一个不缺（`_debug\\_fonttest.py` 渲染对照过）。
+        # 字重用**常规**、不加粗：花底 + 小字号下粗体笔画容易糊成一团，反而难认。
+        # 也别按"缺字"把音标拆成多段：msyh.ttc 的 cmap 会被解析器误报
+        #（ə ɜ ɪ ˈ ː 全判成缺），一拆就混进 Segoe UI，两段字距不齐 —— 雅黑这些 IPA 符号一个不缺。
         phf = self._font(PHON_FACE_FALLBACK or PHON_FACE, fpx, False)
-        # 三个图标统一到**同一个墨迹高度** ih（宇提的：星比喇叭/放大镜高一截）。
-        # 半径不能直接取等 —— 三块形状的"高"跟半径不是一回事，系数都是实拍标定的
-        # （`_debug\_iconprobe.py` 会把三个图标的墨迹框量出来）：
+        # 三个图标统一到**同一个墨迹高度** ih。
+        # 半径不能直接取等 —— 三块形状的"高"跟半径不是一回事，系数都是按实拍墨迹标定的：
         #   喇叭 1.52×hr：声波弧比锥体长得高，"高"是那道弧的高
         #   放大镜 2.00×mr：45° 斜手柄比镜片探得更低
         #   星 1.81×sr + 描边一圈：五角星外接高就是 1.809r，圆角接缝不再往外扎
-        #     （以前星是**实心** + miter 尖角，墨迹又被尖角撑高约 6px，所以老系数
-        #      才要 /2.09 那种怪数 —— 改成线稿之后就回到几何值了）
-        # 动了哪个图标的形状就得重新标一次；`_iconprobe.py` 里"三个图标一样高"
-        # 那条断言就是盯它的。
+        # 动了哪个图标的形状就得重新标一次系数。
         ih = max(12, int(fp * 0.55))
         mr = max(7, int(ih / 2.00))       # 放大镜
         hr = max(8, int(ih / 1.52))       # 喇叭
         # 星的笔宽跟放大镜那一档对齐（放大镜 = 0.26×mr ≈ 0.13×ih）：
-        # 三个图标得看着像**同一支笔**画的，不然一眼就看出星是外来的。
+        # 三个图标得看着像**同一支笔**画的。
         slw = max(1.5, ih * 0.13)
         sr = max(7, int((ih - slw) / 1.81))   # ★（描边上下各占半宽，先减掉一整条）
         igap = max(8, int(fp * 0.22))     # 两个**图标**之间的空隙
@@ -2244,8 +2224,7 @@ class DanmakuLayer(object):
 
         # 信息行比正文还宽时（短单词 + 长音标），把框往右撑到装得下。
         # 两组的宽度和下面三个中心点都出自同一份算式（icon_group_widths /
-        # hover_icons）：以前"框要撑多宽"和"图标画在哪"是两套各写一遍的算式，
-        # 一旦对不上就是框变宽了、图标还按老位置画，图标静悄悄地跑到框外面去。
+        # hover_icons）：两处各写一遍的话，一旦对不上就是框变宽了、图标还按老位置画。
         snd_w, right_w = icon_group_widths(sr, mr, hr, igap)
         mgap = max(10, int(fp * 0.30))    # 喇叭 ↔ 放大镜：两组之间**至少**留这么宽
         need = (ipad + (phf.measure(acc) if acc else 0) + tgap + snd_w
@@ -2286,7 +2265,7 @@ class DanmakuLayer(object):
             c.create_text(txt_l, ty, text=seg, anchor="w", fill=CLR_HOVER_TEXT,
                           font=phf, tags=("hoverui",))
 
-        # 鼠标压在哪一块图标上（宇要的"悬停要有反应"）：那一块放大一档 + 提亮。
+        # 鼠标压在哪一块图标上：那一块放大一档 + 提亮。
         # 只放大不改色的话，线稿的放大镜其实不太看得出来；只改色又离 #E9E9E9
         # 太近。两个一起给，指哪亮哪。
         hot = self._icon_hot
@@ -2317,11 +2296,10 @@ class DanmakuLayer(object):
         lw = max(1.5, ms * 0.26)
         dcl = CLR_DICT_HL if it.get("_dict_hl") else (
             CLR_ICON_HOT if hot == "dict" else CLR_DICT)
-        # ⚠️ 镜片**故意不填色**：留空才像真玻璃（宇 2026-10-14 要的"透明镜面"）。
-        # 代价是圆圈内部那些漏成桌面的像素会被色键抠掉、鼠标在那儿**穿透**，
-        # 窗口收不到点击（`_debug\_holecheck.py` 逐像素量过：画过的像素全点得中，
-        # 漏成桌面的一个都点不中）。补它的不是 fill，是 `_click_poll` 的全局左键
-        # 兜底 —— 所以别看到"空心点不着"就把 fill 填回去。
+        # ⚠️ 镜片**故意不填色**：留空才像真玻璃。代价是圆圈内部那些漏成桌面的像素
+        # 会被色键抠掉、鼠标在那儿**穿透**，窗口收不到点击（逐像素量过：画过的像素
+        # 全点得中，漏成桌面的一个都点不中）。补它的不是 fill，是 `_click_poll` 的
+        # 全局左键兜底 —— 别看到"空心点不着"就把 fill 填回去。
         dids = [c.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
                               outline=dcl, width=lw, tags=("hoverui",)),
                 c.create_line(ccx + cr * 0.707, ccy + cr * 0.707,
@@ -2329,15 +2307,14 @@ class DanmakuLayer(object):
                               ccy + cr * 0.707 + ms * 0.62,
                               fill=dcl, width=lw * 1.25, capstyle="round",
                               tags=("hoverui",))]
-        # 命中框取整块图标的墨迹 —— **镜片圆圈内部**因此在判定区里（宇专门提过），
+        # 命中框取整块图标的墨迹 —— **镜片圆圈内部**因此也在判定区里，
         # 不用为"这里是个空当"再补什么。
         it["_dict_box"] = self._icon_box(dids, ic["dict"], cy, ms)
 
         # —— 收藏星：线稿（跟喇叭 / 放大镜同一支笔）——
-        # 空心、只描边：以前是**实心**星、外接框还比另外两个大一圈，跟信息行里
-        # 另外两个线稿图标不是一套（宇 2026-10-14 指出来）。空心处漏成桌面的像素
-        # 鼠标会穿透、窗口收不到那儿的点击 —— 补它的是 `_click_poll` 的全局左键
-        # 兜底（跟镜片同一个道理，别看到"空心的点不着"就把 fill 填回去）。
+        # 空心、只描边，跟喇叭 / 放大镜同一支笔。空心处漏成桌面的像素鼠标会穿透、
+        # 窗口收不到那儿的点击 —— 补它的是 `_click_poll` 的全局左键兜底
+        #（跟镜片同一个道理，别看到"空心的点不着"就把 fill 填回去）。
         # 颜色落在描边上：收藏 = 金黄、没收藏 = 浅灰（跟放大镜同色，靠形状区分）。
         fav = bool(it.get("_fav"))
         # 悬停只放大、不换色 —— 换色就跟收藏态撞车了（未收藏时顺手提个亮；
@@ -2424,8 +2401,7 @@ class DanmakuLayer(object):
         读音**播放期间**让喇叭一直亮着。
 
         只闪 220ms 是不够的：MCI 起播有半拍延迟，音频本身还有一两秒，
-        闪完灯灭了声音还在，看着就像"点了没反应"。所以改成盯着 MCI 的状态，
-        播完自己收灯。
+        闪完灯灭了声音还在，看着就像"点了没反应"。所以盯着 MCI 的状态，播完自己收灯。
         """
         if self._sound_it is not None and self._sound_it is not it:
             self._unflash(self._sound_it, "_sound_hl")   # 换个词了，先把旧的灭掉
@@ -2529,8 +2505,7 @@ class DanmakuLayer(object):
         """原生窗口刚（去重窗口内、同一处）真收到过 <Button-1> 吗。
 
         兜底**接单之前**必须问这一句：图标是实心像素时，原生那条路先到、这一下
-        早被处理过了，兜底再补一笔就是同一次点击点两遍 —— 收藏就是这么变成
-        "要双击才有效"的（第一下点两次互相抵掉，第二下才净生效。宇 2026-10-14 报的）。
+        早被处理过了，兜底再补一笔就是同一次点击点两遍。
         """
         if xy is None or self._native_press_xy is None:
             return False
@@ -2560,7 +2535,7 @@ class DanmakuLayer(object):
     def _click_poll(self):
         """
         **全局左键兜底**：色键抠掉的像素鼠标会穿透，窗口根本收不到那儿的点击 ——
-        镜片圆圈内部就是这么一块（宇要的"透明镜面"），再准的命中框也救不了。
+        镜片圆圈内部就是这么一块，再准的命中框也救不了。
         所以除了原生 <Button-1>，再自己查一眼左键状态：光标压在某块图标框里，
         就走和原生点击同一条路径。
 
@@ -2597,8 +2572,7 @@ class DanmakuLayer(object):
             # 先只记一笔，不立刻点：留一拍（40ms）给原生投递。原生接到了会在
             # _on_canvas_click 里把这笔单清掉，下一拍这儿便不再出手。
             # ⚠️ 但原生可能**比这一拍还早**（图标是实心像素时就是）：那它早把这一下
-            # 处理完了。先问一句 _native_recent，是的话就别接单 —— 否则同一次点击
-            # 点两遍（收藏"要双击才有效"就是这么来的）。
+            # 处理完了。先问一句 _native_recent，是的话就别接单 —— 否则同一次点击会点两遍。
             xy = self._cursor_xy()
             if xy is not None and not self._native_recent(xy):
                 self._pending_press = xy
@@ -2967,7 +2941,7 @@ class TomatoSlider(tk.Frame):
 # ---------------------------------------------------------------- 全局热键
 #
 # 为什么需要它：面板收起后 root 是 withdrawn 状态，整个应用没有键盘焦点，
-# Tk 的 bind_all 完全收不到按键 —— 而 README 一直写着「Ctrl+Alt+Q 退出」。
+# Tk 的 bind_all 完全收不到按键。
 #
 # RegisterHotKey(NULL, id, ...) 是把热键挂到**调用线程**的消息队列上的，
 # 所以注册和 GetMessageW 必须在同一根线程里，而且必须自己起一根：Tk 的主循环
@@ -3077,7 +3051,7 @@ class DanmakuApp(object):
 
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        # 面板允许拖拽边框自由缩放（用户要求）；内部全部用 pack + expand 自适应
+        # 面板允许拖拽边框自由缩放；内部全部用 pack + expand 自适应
         self.root.resizable(True, True)
         self.root.minsize(330, 430)
         self.root.configure(bg=CLR_BG)
@@ -3212,7 +3186,7 @@ class DanmakuApp(object):
 
         # —— 可滚动视口 ——
         # 滚动条用原生 tk.Scrollbar：这是功能件，造型越朴素越不会让人当成装饰，
-        # 也正好和番茄把手区分开（用户明确要求这里别用番茄）。
+        # 也正好和番茄把手区分开。
         # 用 grid 而不用 pack：滚动条要按需隐藏/恢复，grid_remove 能记住原格位，
         # pack 的话 forget 之后再 pack 会被 expand 的 Canvas 挤到没地方。
         area = tk.Frame(body, bg=CLR_BG)
@@ -3353,7 +3327,7 @@ class DanmakuApp(object):
         # 面板现在可自由缩放，所以再夹一次屏幕范围，避免初始就超出屏幕。
         r.update_idletasks()
         # Canvas 自身的请求尺寸不反映内容，得手动画进内部 frame 的高度，
-        # 否则面板一开就只有一个巴掌高（用户拖小之后才需要滚动）。
+        # 否则面板一开就只有一个巴掌高。
         self.sview.configure(height=max(220, min(scroller.winfo_reqheight(),
                                                  int(get_screen_size()[1] * 0.8))))
         r.update_idletasks()   # 让 Canvas 新高度传导进整体需求，下面读 reqheight 才准
@@ -3865,7 +3839,7 @@ class DanmakuApp(object):
     def toggle(self):
         """
         开始 / 暂停 / 继续 三态。
-        暂停 = 停止移动 + 停止出新词，**画面上的弹幕原地保留**（用户要求，别清屏）。
+        暂停 = 停止移动 + 停止出新词，**画面上的弹幕原地保留**（别清屏）。
         """
         if self.running:
             self.pause()

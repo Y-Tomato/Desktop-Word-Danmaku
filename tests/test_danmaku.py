@@ -150,7 +150,7 @@ class TextCacheKeyTest(unittest.TestCase):
                             danmaku.text_cache_key("b.csv", self.word, self.cfg))
 
     def test_every_build_text_param_is_in_the_key(self):
-        """build_text 读的每个参数都必须进 key：以前漏了 per_pos_meanings。"""
+        """build_text 读的每个参数都必须进 key。"""
         base = danmaku.text_cache_key("a.csv", self.word, self.cfg)
         for k in ("max_meanings", "max_pos", "per_pos_meanings", "max_cn_len"):
             cfg2 = dict(self.cfg)
@@ -457,11 +457,11 @@ class HoverIconLayoutTest(unittest.TestCase):
     """
     信息行「音标 → 喇叭 … 放大镜 · 星」的坐标。
 
-    位置是宇 2026-10-14 拿实拍定的：**喇叭跟着音标走**（读音算音标那一组的），
-    **放大镜 / 星钉在框右端**不动，中间那段空白随音标长短伸缩。
+    **喇叭跟着音标走**（读音算音标那一组的），**放大镜 / 星钉在框右端**不动，
+    中间那段空白随音标长短伸缩。
 
-    这些数字以前是**两套**各写一遍的算式（框要撑多宽 / 图标画在哪），一旦对不上
-    就是图标静悄悄跑到框外。下面几条断言专门盯这类漂移。
+    「框要撑多宽」和「图标画在哪」这两处算式一旦对不上，图标就会静悄悄跑到框外。
+    下面几条断言专门盯这类漂移。
     """
 
     SR, MR, HR, IGAP = 20, 18, 20, 14
@@ -484,9 +484,7 @@ class HoverIconLayoutTest(unittest.TestCase):
 
     def test_speaker_follows_the_phonetic(self):
         """
-        宇 2026-10-14 拍的位置：音标越宽喇叭越往右 —— 读音算音标那一组的。
-        （以前喇叭钉在框的右端、跟音标中间空出一大截，看着跟"查词 / 收藏"才是
-        一组；后来改成三个连成一排跟着音标走，在宽框里仍然像挤在一起。）
+        音标越宽喇叭越往右 —— 读音算音标那一组的。
         """
         a = self._lay(ax=100.0)
         b = self._lay(ax=180.0)
@@ -542,12 +540,12 @@ class HoverIconLayoutTest(unittest.TestCase):
 
     def test_click_boxes_use_the_drawn_ink(self):
         """
-        镜片**圆圈内部**必须在放大镜命中框里（宇专门提过这条）。
+        镜片**圆圈内部**必须在放大镜命中框里。
 
         判定框取的是"画出来的墨迹"而不是推出来的尺寸，所以这条只能连真画布一起验：
         空心的圆里那一片空当也得算在判定区里。注意"在框里"只解决一半问题 ——
         镜片现在不填色，那儿的像素鼠标会穿透，窗口收不到点击，靠 `_click_poll`
-        的全局左键兜底补（见 `_debug\\_hotprobe.py`）。
+        的全局左键兜底补。
         """
         try:
             root = danmaku.tk.Tk()
@@ -589,9 +587,9 @@ class HoverClickDedupTest(unittest.TestCase):
     """
     兜底轮询和原生点击是**同一次物理点击**的两条路：谁先到都得只生效一次。
 
-    宇 2026-10-14 报的"收藏要双击才有效"就是这儿漏了一遍：图标是实心像素时原生
-    先到、这一下早处理完了，兜底下一拍又补了一笔，两次互相抵掉 —— 第一下白点，
-    第二下（250ms 内、原生被去重掉）反而净生效，看着就是"要双击"。
+    图标是实心像素时原生先到、这一下早处理完了，兜底下一拍又补了一笔，两次互相
+    抵掉 —— 第一下白点，第二下（250ms 内、原生被去重掉）反而净生效，
+    看到的就是"点一下没反应"。
 
     ⚠️ 这条只能靠替换掉按键状态来测：真按下鼠标才有的时序，探针造不出来。
     """
